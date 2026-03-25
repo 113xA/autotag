@@ -1,7 +1,10 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useState } from "react";
 import { previewRename } from "../api/tauri";
+import type { RenameSettings } from "../options/types";
 import type { ProposedTags, ReviewTrack, TagSnapshot } from "../types";
+
+const PLACEHOLDER_COVER = "/placeholder-cover.svg";
 
 type Props = {
   track: ReviewTrack;
@@ -11,13 +14,21 @@ type Props = {
   onNextCandidate: () => void;
   onAccept: () => void;
   onSkip: () => void;
-  renameOnApply: boolean;
+  rename: RenameSettings;
 };
 
 function basename(p: string): string {
   const s = p.replace(/\\/g, "/");
   const i = s.lastIndexOf("/");
   return i >= 0 ? s.slice(i + 1) : s;
+}
+
+function parseYear(s: string): number | null {
+  const t = s.trim();
+  if (!t) return null;
+  if (!/^\d{1,9}$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 function Field({
@@ -66,7 +77,7 @@ export function ReviewDeck({
   onNextCandidate,
   onAccept,
   onSkip,
-  renameOnApply,
+  rename,
 }: Props) {
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-200, 200], [-8, 8]);
@@ -74,24 +85,31 @@ export function ReviewDeck({
   const skipOpacity = useTransform(x, [-80, 0], [1, 0]);
 
   const [newNamePreview, setNewNamePreview] = useState<string | null>(null);
+  const [coverFailed, setCoverFailed] = useState(false);
 
   useEffect(() => {
     x.set(0);
   }, [track.path, track.candidateIndex, x]);
 
   useEffect(() => {
-    if (!renameOnApply) {
+    setCoverFailed(false);
+  }, [proposed.coverUrl]);
+
+  useEffect(() => {
+    if (!rename.enabled) {
       setNewNamePreview(null);
       return;
     }
     const a = proposed.artist.trim();
     const t = proposed.title.trim();
-    if (!a || !t) {
+    const album = proposed.album.trim();
+    const year = parseYear(proposed.year);
+    if (!a && !t && !album) {
       setNewNamePreview(null);
       return;
     }
     let cancel = false;
-    previewRename(track.path, a, t)
+    previewRename(track.path, a, t, album, year, rename)
       .then((nm) => {
         if (!cancel) setNewNamePreview(nm);
       })
@@ -101,10 +119,28 @@ export function ReviewDeck({
     return () => {
       cancel = true;
     };
-  }, [renameOnApply, track.path, proposed.artist, proposed.title]);
+  }, [
+    rename.enabled,
+    rename.includeArtist,
+    rename.includeTitle,
+    rename.includeAlbum,
+    rename.includeYear,
+    rename.separator,
+    rename.partOrder,
+    track.path,
+    proposed.artist,
+    proposed.title,
+    proposed.album,
+    proposed.year,
+  ]);
 
   const n = track.candidates.length;
   const currentName = track.fileName || basename(track.path);
+
+  const coverSrc =
+    !proposed.coverUrl || coverFailed
+      ? PLACEHOLDER_COVER
+      : proposed.coverUrl;
 
   async function handleDragEnd(_: unknown, info: { offset: { x: number } }) {
     const dx = info.offset.x;
@@ -148,11 +184,12 @@ export function ReviewDeck({
           </motion.div>
 
           <div className="card-cover">
-            {proposed.coverUrl ? (
-              <img src={proposed.coverUrl} alt="" className="cover-img" />
-            ) : (
-              <div className="cover-placeholder">No cover — drag here to swipe</div>
-            )}
+            <img
+              src={coverSrc}
+              alt=""
+              className="cover-img"
+              onError={() => setCoverFailed(true)}
+            />
           </div>
 
           <div className="card-path" title={track.path}>
@@ -165,7 +202,7 @@ export function ReviewDeck({
           <div className="file-rename-row">
             <code className="mono name-old">{currentName}</code>
             <span className="file-rename-arrow">→</span>
-            {renameOnApply ? (
+            {rename.enabled ? (
               <code className="mono name-new">
                 {newNamePreview ?? "…"}
               </code>

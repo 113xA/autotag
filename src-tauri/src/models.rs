@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::options::ApplyMetadataOptions;
+use crate::options::{ApplyMetadataOptions, RenameOptions};
 
 /// Fields to write from Rekordbox into audio tags (checkboxes from settings).
 #[derive(Debug, Clone, Deserialize)]
@@ -124,7 +124,8 @@ pub struct ApplyPayload {
     pub track_number: Option<u32>,
     pub year: Option<u32>,
     pub cover_url: Option<String>,
-    pub rename_file: bool,
+    /// MusicBrainz release MBID for Cover Art Archive JSON fallback.
+    pub release_mbid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,4 +142,6 @@ pub struct ApplyOutcome {
 pub struct ApplyBatchRequest {
     pub payloads: Vec<ApplyPayload>,
     pub meta: ApplyMetadataOptions,
+    #[serde(default)]
+    pub rename: RenameOptions,
 }

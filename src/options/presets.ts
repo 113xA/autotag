@@ -16,7 +16,7 @@ export const EDM_PRESETS: Record<
       },
       applyMeta: {
         ...s.applyMeta,
-        genre: s.applyMeta.genre ?? "Techno",
+        genre: "Techno",
       },
     }),
   },
@@ -31,7 +31,7 @@ export const EDM_PRESETS: Record<
       },
       applyMeta: {
         ...s.applyMeta,
-        genre: s.applyMeta.genre ?? "Hard Techno",
+        genre: "Hard Techno",
       },
     }),
   },
@@ -46,7 +46,7 @@ export const EDM_PRESETS: Record<
       },
       applyMeta: {
         ...s.applyMeta,
-        genre: s.applyMeta.genre ?? "Hardcore",
+        genre: "Hardcore",
       },
     }),
   },
@@ -61,7 +61,7 @@ export const EDM_PRESETS: Record<
       },
       applyMeta: {
         ...s.applyMeta,
-        genre: s.applyMeta.genre ?? "Rawstyle",
+        genre: "Rawstyle",
       },
     }),
   },
@@ -80,7 +80,14 @@ export function applyPreset(
 ): AppSettings {
   const p = EDM_PRESETS[presetId];
   if (!p) return current;
-  return p.apply({ ...current, cleaning: { ...current.cleaning } });
+  const base: AppSettings = {
+    ...current,
+    cleaning: { ...current.cleaning },
+    matching: { ...current.matching },
+    applyMeta: { ...current.applyMeta },
+    rename: { ...current.rename },
+  };
+  return p.apply(base);
 }
 
 export const GENRE_SUGGESTIONS = [

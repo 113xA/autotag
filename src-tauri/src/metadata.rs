@@ -6,6 +6,7 @@ use lofty::read_from_path;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
 
 use crate::models::{RekordboxApplyPayload, RekordboxWriteOptions, TagSnapshot};
+use crate::options::RenameOptions;
 
 pub fn read_tag_snapshot(path: &str) -> TagSnapshot {
     let Ok(tagged) = read_from_path(path) else {
@@ -139,7 +140,52 @@ pub fn build_rename_path(
     original: &str,
     artist: &str,
     title: &str,
+    album: &str,
+    year: Option<u32>,
+    opts: &RenameOptions,
 ) -> Result<std::path::PathBuf, String> {
+    if !opts.enabled {
+        return Err("rename is disabled".into());
+    }
+    let sep = match opts.separator.as_str() {
+        "underscore" => "_",
+        "dot" => " · ",
+        "dashTight" => "-",
+        _ => " - ",
+    };
+    let mut chunks: Vec<String> = Vec::new();
+    if opts.include_artist {
+        let s = sanitize_path_component(artist);
+        if !s.is_empty() {
+            chunks.push(s);
+        }
+    }
+    if opts.include_title {
+        let s = sanitize_path_component(title);
+        if !s.is_empty() {
+            chunks.push(s);
+        }
+    }
+    if opts.part_order == "titleFirst" && chunks.len() == 2 {
+        chunks.swap(0, 1);
+    }
+    if opts.include_album {
+        let s = sanitize_path_component(album);
+        if !s.is_empty() {
+            chunks.push(s);
+        }
+    }
+    if chunks.is_empty() {
+        return Err(
+            "choose at least one file name part (artist, title, or album) in settings".into(),
+        );
+    }
+    let mut stem = chunks.join(sep);
+    if opts.include_year {
+        if let Some(y) = year {
+            stem.push_str(&format!(" ({y})"));
+        }
+    }
     let p = std::path::Path::new(original);
     let parent = p
         .parent()
@@ -148,18 +194,7 @@ pub fn build_rename_path(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("mp3");
-    let a = sanitize_path_component(artist);
-    let t = sanitize_path_component(title);
-    if a.is_empty() && t.is_empty() {
-        return Err("empty artist and title".to_string());
-    }
-    let base = if a.is_empty() {
-        format!("{t}.{ext}")
-    } else if t.is_empty() {
-        format!("{a}.{ext}")
-    } else {
-        format!("{a} - {t}.{ext}")
-    };
+    let base = format!("{stem}.{ext}");
     Ok(unique_path(parent.join(base)))
 }
 
@@ -184,8 +219,15 @@ fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 /// Final file name after rename rules (for UI preview).
-pub fn preview_rename_filename(original: &str, artist: &str, title: &str) -> Result<String, String> {
-    let p = build_rename_path(original, artist, title)?;
+pub fn preview_rename_filename(
+    original: &str,
+    artist: &str,
+    title: &str,
+    album: &str,
+    year: Option<u32>,
+    rename: &RenameOptions,
+) -> Result<String, String> {
+    let p = build_rename_path(original, artist, title, album, year, rename)?;
     Ok(p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default())

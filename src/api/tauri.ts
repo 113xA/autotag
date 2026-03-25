@@ -11,6 +11,7 @@ import type {
   ApplyMetadataOptions,
   CleaningOptions,
   MatchingOptions,
+  RenameSettings,
 } from "../options/types";
 
 export async function scanFolder(
@@ -30,16 +31,29 @@ export async function batchLookup(
 export async function applyBatch(
   payloads: ApplyPayload[],
   meta: ApplyMetadataOptions,
+  rename: RenameSettings,
 ): Promise<ApplyOutcome[]> {
-  return invoke<ApplyOutcome[]>("apply_batch", { payloads, meta });
+  return invoke<ApplyOutcome[]>("apply_batch", {
+    req: { payloads, meta, rename },
+  });
 }
 
 export async function previewRename(
   path: string,
   artist: string,
   title: string,
+  album: string,
+  year: number | null,
+  rename: RenameSettings,
 ): Promise<string> {
-  return invoke<string>("preview_rename", { path, artist, title });
+  return invoke<string>("preview_rename", {
+    path,
+    artist,
+    title,
+    album,
+    year,
+    rename,
+  });
 }
 
 export function proposedFromTrack(track: ReviewTrack): ProposedTags {
@@ -54,6 +68,7 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
         c.trackNumber != null ? String(c.trackNumber) : "",
       year: c.year != null ? String(c.year) : "",
       coverUrl: c.coverUrl,
+      releaseMbid: c.releaseMbid?.trim() || null,
     };
   }
   return {
@@ -64,5 +79,6 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
     trackNumber: "",
     year: "",
     coverUrl: null,
+    releaseMbid: null,
   };
 }

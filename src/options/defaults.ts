@@ -1,4 +1,4 @@
-import type { AppSettings } from "./types";
+import type { AppSettings, RenameSettings } from "./types";
 
 export const defaultCleaning = (): AppSettings["cleaning"] => ({
   stripPromoParens: true,
@@ -29,6 +29,18 @@ export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({
   genre: null,
   grouping: null,
   comment: null,
+  tryItunesCoverFallback: true,
+  embedPlaceholderWhenNoArt: true,
+});
+
+export const defaultRename = (): RenameSettings => ({
+  enabled: false,
+  includeArtist: true,
+  includeTitle: true,
+  includeAlbum: false,
+  includeYear: false,
+  separator: "dashSpaced",
+  partOrder: "artistFirst",
 });
 
 export const defaultAppSettings = (): AppSettings => ({
@@ -36,5 +48,5 @@ export const defaultAppSettings = (): AppSettings => ({
   matching: defaultMatching(),
   applyMeta: defaultApplyMeta(),
   autoLookupOnImport: true,
-  renameOnApply: false,
+  rename: defaultRename(),
 });

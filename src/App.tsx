@@ -11,7 +11,7 @@ import { OptionsMenu } from "./components/OptionsMenu";
 import { ReviewDeck } from "./components/ReviewDeck";
 import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
-import type { AppSettings } from "./options/types";
+import type { AppSettings, RenameSettings } from "./options/types";
 import type { ApplyPayload, ProposedTags, ReviewTrack, ScannedTrack } from "./types";
 import "./App.css";
 
@@ -38,13 +38,10 @@ function parseU32(s: string): number | null {
   return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
-function buildApplyPart(
-  path: string,
-  p: ProposedTags,
-  renameFile: boolean,
-): ApplyPayload {
+function buildApplyPart(path: string, p: ProposedTags): ApplyPayload {
   const tn = p.trackNumber.trim();
   const yr = p.year.trim();
+  const rm = p.releaseMbid?.trim();
   return {
     path,
     artist: p.artist.trim(),
@@ -54,8 +51,29 @@ function buildApplyPart(
     trackNumber: tn ? parseU32(tn) : null,
     year: yr ? parseU32(yr) : null,
     coverUrl: p.coverUrl,
-    renameFile,
+    releaseMbid: rm || null,
   };
+}
+
+/** Short description of the rename pattern for the apply confirmation dialog. */
+function renameConfirmHint(rename: RenameSettings): string {
+  if (!rename.enabled) return "";
+  const bits: string[] = [];
+  if (rename.includeArtist) bits.push("artist");
+  if (rename.includeTitle) bits.push("title");
+  if (rename.includeAlbum) bits.push("album");
+  if (rename.includeYear) bits.push("year");
+  const sep =
+    rename.separator === "underscore"
+      ? "_"
+      : rename.separator === "dot"
+        ? "·"
+        : rename.separator === "dashTight"
+          ? "-"
+          : "–";
+  const order =
+    rename.partOrder === "titleFirst" ? "title first" : "artist first";
+  return ` (${bits.join(` ${sep} `)}; ${order})`;
 }
 
 export default function App() {
@@ -191,18 +209,14 @@ export default function App() {
       return;
     }
     setError(null);
-    const part = buildApplyPart(
-      current.path,
-      working,
-      settings.renameOnApply,
-    );
+    const part = buildApplyPart(current.path, working);
     setAcceptedPayloads((a) => [...a, part]);
     setTracks((ts) =>
       ts.map((t) =>
         t.path === current.path ? { ...t, reviewStatus: "accepted" } : t,
       ),
     );
-  }, [current, working, settings.renameOnApply]);
+  }, [current, working]);
 
   const handleSkip = useCallback(() => {
     setTracks((ts) => {
@@ -222,19 +236,20 @@ export default function App() {
       grouping: settings.applyMeta.grouping?.trim() || null,
       comment: settings.applyMeta.comment?.trim() || null,
     };
-    if (
-      !meta.writeTags &&
-      !acceptedPayloads.some((p) => p.renameFile)
-    ) {
-      setError("Enable “Write tags” and/or “Rename files” in settings.");
+    if (!meta.writeTags && !settings.rename.enabled) {
+      setError("Enable “Write tags” and/or “Rename files on apply” in settings.");
       return;
     }
     const n = acceptedPayloads.length;
     const willTag = meta.writeTags;
-    const willRename = acceptedPayloads.some((p) => p.renameFile);
+    const willRename = settings.rename.enabled;
     const actions: string[] = [];
     if (willTag) actions.push("write embedded tags (and cover if enabled)");
-    if (willRename) actions.push("rename files on disk");
+    if (willRename) {
+      actions.push(
+        `rename files on disk${renameConfirmHint(settings.rename)}`,
+      );
+    }
     const summary = actions.join(" and ");
     const ok = window.confirm(
       `You are about to permanently change ${n} file${n === 1 ? "" : "s"}.\n\n` +
@@ -247,7 +262,11 @@ export default function App() {
     setLongTask(true);
     setError(null);
     try {
-      const outcomes = await applyBatch(acceptedPayloads, meta);
+      const outcomes = await applyBatch(
+        acceptedPayloads,
+        meta,
+        settings.rename,
+      );
       setApplyOutcomes(outcomes);
       setPhase("apply_done");
     } catch (e) {
@@ -404,7 +423,7 @@ export default function App() {
               onNextCandidate={() => bumpCandidate(1)}
               onAccept={handleAccept}
               onSkip={handleSkip}
-              renameOnApply={settings.renameOnApply}
+              rename={settings.rename}
             />
           )}
         </>

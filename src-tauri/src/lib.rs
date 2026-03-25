@@ -1,3 +1,4 @@
+mod cover_art;
 mod filename_clean;
 mod metadata;
 mod models;
@@ -7,10 +8,10 @@ mod rekordbox_xml;
 
 use std::path::Path;
 
-use reqwest::header::CONTENT_TYPE;
 use tauri::Emitter;
 use walkdir::WalkDir;
 
+use crate::cover_art::{placeholder_cover_png_bytes, resolve_cover_art, CoverResolveParams};
 use crate::filename_clean::clean_filename_stem;
 use crate::metadata::{
     build_rename_path, preview_rename_filename, read_tag_snapshot, write_rekordbox_tags,
@@ -21,7 +22,9 @@ use crate::models::{
     RekordboxWriteOptions, ScannedTrack,
 };
 use crate::musicbrainz::MbState;
-use crate::options::{ApplyMetadataOptions, CleaningOptions, MatchingOptions, ProgressPayload};
+use crate::options::{
+    ApplyMetadataOptions, CleaningOptions, MatchingOptions, ProgressPayload, RenameOptions,
+};
 use crate::rekordbox_xml::{match_rekordbox_xml_to_paths, RekordboxMatchSummary};
 
 const AUDIO_EXT: &[&str] = &["mp3", "flac", "m4a", "mp4", "ogg", "opus"];
@@ -171,6 +174,7 @@ async fn apply_batch(
     let client = state.client.clone();
     let total = req.payloads.len() as u32;
     let meta = req.meta;
+    let rename = req.rename.clone();
     emit_progress(
         &app,
         ProgressPayload {
@@ -183,7 +187,7 @@ async fn apply_batch(
     let mut outcomes = Vec::with_capacity(req.payloads.len());
     for (i, payload) in req.payloads.into_iter().enumerate() {
         let path = payload.path.clone();
-        let res = apply_one(&client, payload, &meta).await;
+        let res = apply_one(&client, payload, &meta, &rename).await;
         outcomes.push(match res {
             Ok(()) => ApplyOutcome {
                 path,
@@ -210,8 +214,15 @@ async fn apply_batch(
 }
 
 #[tauri::command]
-fn preview_rename(path: String, artist: String, title: String) -> Result<String, String> {
-    preview_rename_filename(&path, &artist, &title)
+fn preview_rename(
+    path: String,
+    artist: String,
+    title: String,
+    album: String,
+    year: Option<u32>,
+    rename: RenameOptions,
+) -> Result<String, String> {
+    preview_rename_filename(&path, &artist, &title, &album, year, &rename)
 }
 
 #[tauri::command]
@@ -303,27 +314,30 @@ async fn apply_one(
     client: &reqwest::Client,
     payload: ApplyPayload,
     meta: &ApplyMetadataOptions,
+    rename: &RenameOptions,
 ) -> Result<(), String> {
-    let want_cover = meta.embed_cover && payload.cover_url.is_some();
-
-    let (cover_bytes, mime_hint): (Option<Vec<u8>>, Option<String>) = if want_cover {
-        match client
-            .get(payload.cover_url.as_ref().unwrap())
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let mime = resp
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from);
-                match resp.bytes().await {
-                    Ok(b) => (Some(b.to_vec()), mime),
-                    Err(_) => (None, None),
-                }
-            }
-            _ => (None, None),
+    let (cover_bytes, mime_hint): (Option<Vec<u8>>, Option<String>) = if meta.embed_cover {
+        let resolved = resolve_cover_art(
+            client,
+            CoverResolveParams {
+                primary_url: payload.cover_url.as_deref(),
+                release_mbid: payload.release_mbid.as_deref(),
+                artist: &payload.artist,
+                title: &payload.title,
+                album: &payload.album,
+                try_itunes_fallback: meta.try_itunes_cover_fallback,
+            },
+        )
+        .await;
+        if let Some((b, m)) = resolved {
+            (Some(b), m)
+        } else if meta.embed_placeholder_when_no_art {
+            (
+                Some(placeholder_cover_png_bytes().to_vec()),
+                Some("image/png".into()),
+            )
+        } else {
+            (None, None)
         }
     } else {
         (None, None)
@@ -336,8 +350,8 @@ async fn apply_one(
     let album_artist = payload.album_artist;
     let track_number = payload.track_number;
     let year = payload.year;
-    let rename_file = payload.rename_file;
     let meta = meta.clone();
+    let rename = rename.clone();
 
     tokio::task::spawn_blocking(move || {
         if meta.write_tags {
@@ -359,8 +373,15 @@ async fn apply_one(
                 },
             )?;
         }
-        if rename_file {
-            let new_path = build_rename_path(&path, &artist, &title)?;
+        if rename.enabled {
+            let new_path = build_rename_path(
+                &path,
+                &artist,
+                &title,
+                &album,
+                year,
+                &rename,
+            )?;
             if new_path.as_path() != Path::new(&path) {
                 std::fs::rename(&path, &new_path).map_err(|e| e.to_string())?;
             }

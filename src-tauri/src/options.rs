@@ -65,6 +65,39 @@ impl Default for MatchingOptions {
     }
 }
 
+/// File rename pattern on apply (mirrors frontend `RenameSettings`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameOptions {
+    pub enabled: bool,
+    pub include_artist: bool,
+    pub include_title: bool,
+    pub include_album: bool,
+    pub include_year: bool,
+    /// `dashSpaced` | `dashTight` | `underscore` | `dot`
+    pub separator: String,
+    /// `artistFirst` | `titleFirst` (only when both artist and title are on)
+    pub part_order: String,
+}
+
+impl Default for RenameOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            include_artist: true,
+            include_title: true,
+            include_album: false,
+            include_year: false,
+            separator: "dashSpaced".into(),
+            part_order: "artistFirst".into(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyMetadataOptions {
@@ -73,6 +106,12 @@ pub struct ApplyMetadataOptions {
     pub genre: Option<String>,
     pub grouping: Option<String>,
     pub comment: Option<String>,
+    /// If MusicBrainz/CAA has no art, query iTunes search (artist + title).
+    #[serde(default = "default_true")]
+    pub try_itunes_cover_fallback: bool,
+    /// When embedding cover and no image was found, embed the built-in X placeholder.
+    #[serde(default = "default_true")]
+    pub embed_placeholder_when_no_art: bool,
 }
 
 impl Default for ApplyMetadataOptions {
@@ -83,6 +122,8 @@ impl Default for ApplyMetadataOptions {
             genre: None,
             grouping: None,
             comment: None,
+            try_itunes_cover_fallback: true,
+            embed_placeholder_when_no_art: true,
         }
     }
 }

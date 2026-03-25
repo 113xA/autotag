@@ -29,6 +29,21 @@ export type ApplyMetadataOptions = {
   genre: string | null;
   grouping: string | null;
   comment: string | null;
+  tryItunesCoverFallback: boolean;
+  embedPlaceholderWhenNoArt: boolean;
+};
+
+/** Separator between file name parts (maps to Rust `RenameOptions.separator`). */
+export type RenameSeparator = "dashSpaced" | "dashTight" | "underscore" | "dot";
+
+export type RenameSettings = {
+  enabled: boolean;
+  includeArtist: boolean;
+  includeTitle: boolean;
+  includeAlbum: boolean;
+  includeYear: boolean;
+  separator: RenameSeparator;
+  partOrder: "artistFirst" | "titleFirst";
 };
 
 export type AppSettings = {
@@ -36,7 +51,7 @@ export type AppSettings = {
   matching: MatchingOptions;
   applyMeta: ApplyMetadataOptions;
   autoLookupOnImport: boolean;
-  renameOnApply: boolean;
+  rename: RenameSettings;
 };
 
 export type ProgressPayload = {

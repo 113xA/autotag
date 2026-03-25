@@ -1,5 +1,9 @@
+import { useEffect, useState } from "react";
+import { previewRename } from "../api/tauri";
 import { EDM_PRESETS, GENRE_SUGGESTIONS, applyPreset } from "../options/presets";
-import type { AppSettings } from "../options/types";
+import type { AppSettings, RenameSeparator, RenameSettings } from "../options/types";
+
+const RENAME_PREVIEW_PATH = "C:\\Music\\example track.mp3";
 
 type Props = {
   settings: AppSettings;
@@ -9,9 +13,48 @@ type Props = {
 };
 
 export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
+  const [renameExample, setRenameExample] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const r = settings.rename;
+    if (!r.enabled) {
+      setRenameExample(null);
+      return;
+    }
+    let cancel = false;
+    previewRename(
+      RENAME_PREVIEW_PATH,
+      "Artist One",
+      "Track Title",
+      "Album Name",
+      2024,
+      r,
+    )
+      .then((name) => {
+        if (!cancel) setRenameExample(name);
+      })
+      .catch(() => {
+        if (!cancel) setRenameExample(null);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [open, settings.rename]);
+
   if (!open) return null;
 
   const s = settings;
+
+  const renamePartsInvalid =
+    s.rename.enabled &&
+    !s.rename.includeArtist &&
+    !s.rename.includeTitle &&
+    !s.rename.includeAlbum;
+
+  function patchRename(next: Partial<RenameSettings>) {
+    onChange({ ...s, rename: { ...s.rename, ...next } });
+  }
 
   return (
     <>
@@ -48,6 +91,22 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                 </button>
               ))}
             </div>
+            <div className="preset-summary" aria-live="polite">
+              <div className="preset-summary-row">
+                <span className="preset-summary-label">Tag bias</span>
+                <span className="preset-summary-value mono">
+                  {s.matching.tagBias.trim()
+                    ? s.matching.tagBias
+                    : "None (wider MusicBrainz matches)"}
+                </span>
+              </div>
+              <div className="preset-summary-row">
+                <span className="preset-summary-label">Genre on apply</span>
+                <span className="preset-summary-value">
+                  {s.applyMeta.genre?.trim() || "—"}
+                </span>
+              </div>
+            </div>
           </section>
 
           <section className="opt-section">
@@ -62,16 +121,9 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               />
               Auto MusicBrainz lookup after scan
             </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={s.renameOnApply}
-                onChange={(e) =>
-                  onChange({ ...s, renameOnApply: e.target.checked })
-                }
-              />
-              Rename files on apply (Artist - Title.ext)
-            </label>
+            <p className="opt-hint" style={{ marginTop: "0.5rem" }}>
+              File rename rules are in <strong>File naming</strong> below.
+            </p>
           </section>
 
           <section className="opt-section">
@@ -311,10 +363,69 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               />
               Embed front cover art
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.applyMeta.tryItunesCoverFallback}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    applyMeta: {
+                      ...s.applyMeta,
+                      tryItunesCoverFallback: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Try iTunes artwork if MusicBrainz has no cover (sends artist and
+              title to Apple’s public search)
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.applyMeta.embedPlaceholderWhenNoArt}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    applyMeta: {
+                      ...s.applyMeta,
+                      embedPlaceholderWhenNoArt: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Embed placeholder image when no art is found (with embed cover on)
+            </label>
             <label className="field">
               <span>Genre</span>
+              <select
+                className="genre-quick-select"
+                value={
+                  GENRE_SUGGESTIONS.filter(Boolean).includes(
+                    (s.applyMeta.genre ?? "").trim(),
+                  )
+                    ? (s.applyMeta.genre ?? "").trim()
+                    : ""
+                }
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    applyMeta: {
+                      ...s.applyMeta,
+                      genre: e.target.value.trim() || null,
+                    },
+                  })
+                }
+              >
+                <option value="">Quick pick…</option>
+                {GENRE_SUGGESTIONS.filter(Boolean).map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
               <input
-                list="genre-suggestions"
+                className="genre-custom-input"
                 value={s.applyMeta.genre ?? ""}
                 onChange={(e) =>
                   onChange({
@@ -325,13 +436,8 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                     },
                   })
                 }
-                placeholder="Leave empty to clear on write"
+                placeholder="Type any genre (used on apply; overrides quick pick when different)"
               />
-              <datalist id="genre-suggestions">
-                {GENRE_SUGGESTIONS.filter(Boolean).map((g) => (
-                  <option key={g} value={g} />
-                ))}
-              </datalist>
             </label>
             <label className="field block">
               <span>Grouping (optional)</span>
@@ -365,6 +471,145 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                 }
               />
             </label>
+          </section>
+
+          <section className="opt-section">
+            <h3>File naming</h3>
+            <p className="opt-hint">
+              Applied when you accept tracks and run apply. Year is appended as{" "}
+              <span className="mono">(2024)</span> when enabled.
+            </p>
+
+            <div className="toggle-master">
+              <span id="rename-master-label">Rename files on apply</span>
+              <button
+                type="button"
+                role="switch"
+                aria-labelledby="rename-master-label"
+                aria-checked={s.rename.enabled}
+                className={`toggle-switch ${s.rename.enabled ? "on" : ""}`}
+                onClick={() => patchRename({ enabled: !s.rename.enabled })}
+              >
+                <span className="toggle-knob" />
+              </button>
+            </div>
+
+            <fieldset
+              className="rename-fieldset"
+              disabled={!s.rename.enabled}
+            >
+              <div className="toggle-row">
+                <span id="sw-artist">Artist</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-labelledby="sw-artist"
+                  aria-checked={s.rename.includeArtist}
+                  className={`toggle-switch ${s.rename.includeArtist ? "on" : ""}`}
+                  onClick={() =>
+                    patchRename({ includeArtist: !s.rename.includeArtist })
+                  }
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+              <div className="toggle-row">
+                <span id="sw-title">Title</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-labelledby="sw-title"
+                  aria-checked={s.rename.includeTitle}
+                  className={`toggle-switch ${s.rename.includeTitle ? "on" : ""}`}
+                  onClick={() =>
+                    patchRename({ includeTitle: !s.rename.includeTitle })
+                  }
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+              <div className="toggle-row">
+                <span id="sw-album">Album</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-labelledby="sw-album"
+                  aria-checked={s.rename.includeAlbum}
+                  className={`toggle-switch ${s.rename.includeAlbum ? "on" : ""}`}
+                  onClick={() =>
+                    patchRename({ includeAlbum: !s.rename.includeAlbum })
+                  }
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+              <div className="toggle-row">
+                <span id="sw-year">Year suffix</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-labelledby="sw-year"
+                  aria-checked={s.rename.includeYear}
+                  className={`toggle-switch ${s.rename.includeYear ? "on" : ""}`}
+                  onClick={() =>
+                    patchRename({ includeYear: !s.rename.includeYear })
+                  }
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+
+              <label className="field">
+                <span>Separator between parts</span>
+                <select
+                  value={s.rename.separator}
+                  onChange={(e) =>
+                    patchRename({
+                      separator: e.target.value as RenameSeparator,
+                    })
+                  }
+                >
+                  <option value="dashSpaced">Space – space ( - )</option>
+                  <option value="dashTight">Hyphen (-)</option>
+                  <option value="underscore">Underscore (_)</option>
+                  <option value="dot">Middle dot (·)</option>
+                </select>
+              </label>
+
+              <label className="field">
+                <span>Order (artist &amp; title)</span>
+                <select
+                  value={s.rename.partOrder}
+                  onChange={(e) =>
+                    patchRename({
+                      partOrder: e.target.value as "artistFirst" | "titleFirst",
+                    })
+                  }
+                >
+                  <option value="artistFirst">Artist first</option>
+                  <option value="titleFirst">Title first</option>
+                </select>
+              </label>
+
+              {renamePartsInvalid && (
+                <p className="rename-warning" role="alert">
+                  Choose at least one of artist, title, or album, or apply will
+                  fail for rename.
+                </p>
+              )}
+
+              <div className="rename-preview-box" aria-live="polite">
+                <span className="rename-preview-label">Preview</span>
+                <code className="mono rename-preview-value">
+                  {s.rename.enabled
+                    ? renameExample ?? "…"
+                    : "—"}
+                </code>
+                <span className="rename-preview-note muted">
+                  Example: Artist One, Track Title, Album Name, 2024
+                </span>
+              </div>
+            </fieldset>
           </section>
         </div>
       </aside>

@@ -31,7 +31,7 @@ export type ApplyPayload = {
   trackNumber: number | null;
   year: number | null;
   coverUrl: string | null;
-  renameFile: boolean;
+  releaseMbid: string | null;
 };
 
 export type LookupCandidate = {
@@ -66,6 +66,7 @@ export type ProposedTags = {
   trackNumber: string;
   year: string;
   coverUrl: string | null;
+  releaseMbid: string | null;
 };
 
 export type ApplyOutcome = {
