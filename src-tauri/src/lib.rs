@@ -1,4 +1,5 @@
 mod cover_art;
+mod filename_catalog;
 mod filename_clean;
 mod metadata;
 mod models;
@@ -143,11 +144,31 @@ async fn batch_lookup(
             message: None,
         },
     );
+    let client = state.client.clone();
     let mut results = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let candidates = state
-            .lookup(&item.artist, &item.title, &matching)
-            .await?;
+        let hint = if matching.use_itunes_filename_hints && !item.filename_stem.trim().is_empty() {
+            filename_catalog::resolve_from_stem(
+                &client,
+                &item.filename_stem,
+                &item.artist,
+                &item.title,
+            )
+            .await
+        } else {
+            None
+        };
+        let (artist, title) = filename_catalog::merge_for_mb(
+            &item.artist,
+            &item.title,
+            &item.filename_stem,
+            hint.as_ref(),
+        );
+        let mut candidates = state.lookup(&artist, &title, &matching).await?;
+        filename_catalog::backfill_top_cover(
+            &mut candidates,
+            hint.as_ref().and_then(|h| h.artwork_url_hires.as_ref()),
+        );
         results.push(LookupResult {
             path: item.path.clone(),
             candidates,

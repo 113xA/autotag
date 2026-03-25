@@ -52,6 +52,9 @@ pub struct MatchingOptions {
     pub fallback_recording_only: bool,
     /// Second pass: shorter title (strip parenthetical segments).
     pub fallback_strip_parens: bool,
+    /// Query Apple iTunes Search with the filename stem to improve artist/title/cover hints.
+    #[serde(default = "default_true")]
+    pub use_itunes_filename_hints: bool,
 }
 
 impl Default for MatchingOptions {
@@ -61,6 +64,7 @@ impl Default for MatchingOptions {
             tag_bias: String::new(),
             fallback_recording_only: true,
             fallback_strip_parens: true,
+            use_itunes_filename_hints: true,
         }
     }
 }

@@ -333,6 +333,22 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               />
               Fallback: strip ( ) / [ ] from title and retry
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.useItunesFilenameHints}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      useItunesFilenameHints: e.target.checked,
+                    },
+                  })
+                }
+              />
+              iTunes filename hints (stem sent to Apple search)
+            </label>
           </section>
 
           <section className="opt-section">

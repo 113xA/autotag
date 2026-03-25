@@ -21,8 +21,15 @@ export async function scanFolder(
   return invoke<ScannedTrack[]>("scan_folder", { path, cleaning });
 }
 
+export type LookupBatchItem = {
+  path: string;
+  artist: string;
+  title: string;
+  filenameStem: string;
+};
+
 export async function batchLookup(
-  items: { path: string; artist: string; title: string }[],
+  items: LookupBatchItem[],
   matching: MatchingOptions,
 ): Promise<LookupResult[]> {
   return invoke<LookupResult[]>("batch_lookup", { items, matching });

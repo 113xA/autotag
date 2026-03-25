@@ -21,6 +21,7 @@ export const defaultMatching = (): AppSettings["matching"] => ({
   tagBias: "",
   fallbackRecordingOnly: true,
   fallbackStripParens: true,
+  useItunesFilenameHints: true,
 });
 
 export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({

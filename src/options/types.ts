@@ -21,6 +21,8 @@ export type MatchingOptions = {
   tagBias: string;
   fallbackRecordingOnly: boolean;
   fallbackStripParens: boolean;
+  /** Send filename stem to Apple iTunes Search for artist/title/cover hints. */
+  useItunesFilenameHints: boolean;
 };
 
 export type ApplyMetadataOptions = {

@@ -7,12 +7,14 @@ import {
   scanFolder,
 } from "./api/tauri";
 import { LoadingOverlay } from "./components/LoadingOverlay";
+import { Logo } from "./components/Logo";
 import { OptionsMenu } from "./components/OptionsMenu";
 import { ReviewDeck } from "./components/ReviewDeck";
 import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
 import type { AppSettings, RenameSettings } from "./options/types";
 import type { ApplyPayload, ProposedTags, ReviewTrack, ScannedTrack } from "./types";
+import { parseU32 } from "./utils/parse";
 import "./App.css";
 
 type Phase = "import" | "review" | "apply_done";
@@ -27,15 +29,6 @@ function toReviewTracks(
     candidateIndex: 0,
     reviewStatus: "pending" as const,
   }));
-}
-
-/** Strict non-negative integer for track # / year (avoids parseInt partial matches). */
-function parseU32(s: string): number | null {
-  const t = s.trim();
-  if (!t) return null;
-  if (!/^\d{1,9}$/.test(t)) return null;
-  const n = Number(t);
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 function buildApplyPart(path: string, p: ProposedTags): ApplyPayload {
@@ -136,6 +129,7 @@ export default function App() {
           path: t.path,
           artist: t.cleaned.searchArtist,
           title: t.cleaned.searchTitle,
+          filenameStem: t.filenameStem,
         }));
         const results = await batchLookup(items, settings.matching);
         const m = new Map(
@@ -164,6 +158,7 @@ export default function App() {
         path: t.path,
         artist: t.cleaned.searchArtist,
         title: t.cleaned.searchTitle,
+        filenameStem: t.filenameStem,
       }));
       const results = await batchLookup(items, settings.matching);
       const m = new Map(results.map((r) => [r.path, r.candidates] as const));
@@ -290,165 +285,185 @@ export default function App() {
     <div className="app-shell">
       <div className="app-bg" aria-hidden="true" />
       <div className="app">
-      <LoadingOverlay open={longTask} progress={progress} />
+        <LoadingOverlay open={longTask} progress={progress} />
 
-      <header className="header">
-        <div className="header-row">
-          <div className="brand-block">
-            <span className="brand-badge">Music library</span>
-            <h1>Library Autotag</h1>
-            <p className="tagline">
-              EDM / techno / hardcore: clean names, MusicBrainz match, verify, then
-              tag and rename.
-            </p>
-          </div>
-          <button
-            type="button"
-            className="btn btn-ghost settings-btn"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <span className="btn-icon-label" aria-hidden="true">⚙</span>
-            Settings
-          </button>
-        </div>
-      </header>
-
-      <OptionsMenu
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        settings={settings}
-        onChange={updateSettings}
-      />
-
-      {phase === "import" && (
-        <section className="panel panel-hero">
-          <p className="muted import-hint">
-            Configure cleaning, matching, and metadata in{" "}
-            <strong>Settings</strong>, then choose a folder.
-          </p>
-          <button
-            type="button"
-            className="btn primary"
-            onClick={pickFolder}
-            disabled={longTask}
-          >
-            Choose music folder
-          </button>
-          {folder && <p className="muted">Last folder: {folder}</p>}
-        </section>
-      )}
-
-      {phase === "review" && (
-        <>
-          <section className="toolbar">
-            <div className="toolbar-inner">
-              <span className="stat stat-pill">
-                <strong>{tracks.length}</strong> files
-                <span className="stat-divider" aria-hidden="true" />
-                <strong>{pendingCount}</strong> left
-              </span>
-              <div className="toolbar-actions">
-                <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
-                  Re-run lookup
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  Options
-                </button>
+        <header className="header">
+          <div className="header-row">
+            <div className="brand-row">
+              <div className="brand-mark">
+                <Logo className="brand-logo" size={48} />
+              </div>
+              <div className="brand-block">
+                <span className="brand-badge">Music library</span>
+                <h1>Library Autotag</h1>
+                <p className="tagline">
+                  EDM / techno / hardcore: clean names, MusicBrainz match, verify,
+                  then tag and rename.
+                </p>
               </div>
             </div>
-          </section>
-
-          {error && <div className="banner error">{error}</div>}
-
-          <details className="file-details">
-            <summary>All files ({tracks.length})</summary>
-            <div className="file-table-wrap">
-              <table className="file-table">
-                <thead>
-                  <tr>
-                    <th>File</th>
-                    <th>Path</th>
-                    <th>Cleaned</th>
-                    <th>Tags</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tracks.map((t) => (
-                    <tr key={t.path}>
-                      <td className="mono">{t.fileName}</td>
-                      <td className="mono narrow-path">{t.path}</td>
-                      <td>{t.cleaned.display}</td>
-                      <td>
-                        {t.current.artist ?? "—"} — {t.current.title ?? "—"}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </details>
-
-          {allDone && (
-            <section className="panel apply-panel panel-accent">
-              <p className="apply-panel-lead">
-                Review complete. <strong>{acceptedPayloads.length}</strong>{" "}
-                accepted for apply.
-              </p>
-              <div className="row">
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={runApply}
-                  disabled={acceptedPayloads.length === 0 || longTask}
+                        <button
+              type="button"
+              className="btn btn-ghost settings-btn"
+              aria-label="Open settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <svg
+                className="settings-icon"
+                viewBox="0 0 18 24"
+                width={18}
+                height={24}
+                aria-hidden="true"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <g
+                  transform="translate(9 12) scale(0.52) translate(-12 -12)"
+                  fill="currentColor"
                 >
-                  Apply all accepted
-                </button>
-                <button type="button" className="btn" onClick={resetImport}>
-                  Start over
-                </button>
+                  <path d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm7.43-2.53c.04-.32.07-.64.07-.97s-.03-.66-.07-.98l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.37-.31-.59-.22l-2.49 1c-.52-.4-1.06-.73-1.69-.98l-.37-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.47 0-.59.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.63c-.04.32-.07.65-.07.98s.03.65.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.37.3.59.22l2.49-1.01c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.26 1.17-.59 1.69-.98l2.49 1.01c.22.08.47 0 .59-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.63z" />
+                </g>
+              </svg>
+              Settings
+            </button>
+          </div>
+        </header>
+
+        <OptionsMenu
+          open={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          settings={settings}
+          onChange={updateSettings}
+        />
+
+        {phase === "import" && (
+          <section className="panel panel-hero">
+            <p className="muted import-hint">
+              Configure cleaning, matching, and metadata in{" "}
+              <strong>Settings</strong>, then choose a folder.
+            </p>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={pickFolder}
+              disabled={longTask}
+            >
+              Choose music folder
+            </button>
+            {folder && <p className="muted">Last folder: {folder}</p>}
+          </section>
+        )}
+
+        {phase === "review" && (
+          <>
+            <section className="toolbar">
+              <div className="toolbar-inner">
+                <span className="stat stat-pill">
+                  <strong>{tracks.length}</strong> files
+                  <span className="stat-divider" aria-hidden="true" />
+                  <strong>{pendingCount}</strong> left
+                </span>
+                <div className="toolbar-actions">
+                  <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
+                    Re-run lookup
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    Options
+                  </button>
+                </div>
               </div>
             </section>
-          )}
 
-          {current && working && !allDone && (
-            <ReviewDeck
-              track={current}
-              proposed={working}
-              onProposedChange={setWorking}
-              onPrevCandidate={() => bumpCandidate(-1)}
-              onNextCandidate={() => bumpCandidate(1)}
-              onAccept={handleAccept}
-              onSkip={handleSkip}
-              rename={settings.rename}
-            />
-          )}
-        </>
-      )}
+            {error && <div className="banner error">{error}</div>}
 
-      {phase === "apply_done" && applyOutcomes && (
-        <section className="panel panel-done">
-          <h2 className="panel-title">Apply finished</h2>
-          <ul className="outcomes">
-            {applyOutcomes.map((o) => (
-              <li key={o.path} className={o.ok ? "ok" : "bad"}>
-                <span className="path">{o.path}</span>
-                {o.ok ? (
-                  <span>OK</span>
-                ) : (
-                  <span className="err">{o.error}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-          <button type="button" className="btn primary" onClick={resetImport}>
-            New session
-          </button>
-        </section>
-      )}
+            <details className="file-details">
+              <summary>All files ({tracks.length})</summary>
+              <div className="file-table-wrap">
+                <table className="file-table">
+                  <thead>
+                    <tr>
+                      <th>File</th>
+                      <th>Path</th>
+                      <th>Cleaned</th>
+                      <th>Tags</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tracks.map((t) => (
+                      <tr key={t.path}>
+                        <td className="mono">{t.fileName}</td>
+                        <td className="mono narrow-path">{t.path}</td>
+                        <td>{t.cleaned.display}</td>
+                        <td>
+                          {t.current.artist ?? "—"} — {t.current.title ?? "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            {allDone && (
+              <section className="panel apply-panel panel-accent">
+                <p className="apply-panel-lead">
+                  Review complete. <strong>{acceptedPayloads.length}</strong>{" "}
+                  accepted for apply.
+                </p>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="btn primary"
+                    onClick={runApply}
+                    disabled={acceptedPayloads.length === 0 || longTask}
+                  >
+                    Apply all accepted
+                  </button>
+                  <button type="button" className="btn" onClick={resetImport}>
+                    Start over
+                  </button>
+                </div>
+              </section>
+            )}
+
+            {current && working && !allDone && (
+              <ReviewDeck
+                track={current}
+                proposed={working}
+                onProposedChange={setWorking}
+                onPrevCandidate={() => bumpCandidate(-1)}
+                onNextCandidate={() => bumpCandidate(1)}
+                onAccept={handleAccept}
+                onSkip={handleSkip}
+                rename={settings.rename}
+              />
+            )}
+          </>
+        )}
+
+        {phase === "apply_done" && applyOutcomes && (
+          <section className="panel panel-done">
+            <h2 className="panel-title">Apply finished</h2>
+            <ul className="outcomes">
+              {applyOutcomes.map((o) => (
+                <li key={o.path} className={o.ok ? "ok" : "bad"}>
+                  <span className="path">{o.path}</span>
+                  {o.ok ? (
+                    <span>OK</span>
+                  ) : (
+                    <span className="err">{o.error}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <button type="button" className="btn primary" onClick={resetImport}>
+              New session
+            </button>
+          </section>
+        )}
       </div>
     </div>
   );

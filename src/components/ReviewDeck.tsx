@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { previewRename } from "../api/tauri";
 import type { RenameSettings } from "../options/types";
 import type { ProposedTags, ReviewTrack, TagSnapshot } from "../types";
+import { parseU32 } from "../utils/parse";
 
 const PLACEHOLDER_COVER = "/placeholder-cover.svg";
 
@@ -21,14 +22,6 @@ function basename(p: string): string {
   const s = p.replace(/\\/g, "/");
   const i = s.lastIndexOf("/");
   return i >= 0 ? s.slice(i + 1) : s;
-}
-
-function parseYear(s: string): number | null {
-  const t = s.trim();
-  if (!t) return null;
-  if (!/^\d{1,9}$/.test(t)) return null;
-  const n = Number(t);
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 function Field({
@@ -103,7 +96,7 @@ export function ReviewDeck({
     const a = proposed.artist.trim();
     const t = proposed.title.trim();
     const album = proposed.album.trim();
-    const year = parseYear(proposed.year);
+    const year = parseU32(proposed.year);
     if (!a && !t && !album) {
       setNewNamePreview(null);
       return;

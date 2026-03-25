@@ -24,25 +24,24 @@ export function LoadingOverlay({ open, progress }: Props) {
       : "scan";
   const total = progress?.total ?? 0;
   const done = progress?.done ?? 0;
-  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const hasTotal = total > 0;
+  const pct = hasTotal ? Math.min(100, Math.round((done / total) * 100)) : null;
   const sub =
-    progress?.message ??
-    (total > 0 ? `${done} / ${total}` : null);
+    progress?.message ?? (hasTotal ? `${done} / ${total}` : null);
   const title = LABELS[kind] ?? "Working…";
+  const indeterminate = !hasTotal;
 
   return (
     <div className="loading-overlay" role="alertdialog" aria-busy="true">
       <div className="loading-card">
         <h2 className="loading-title">{title}</h2>
         {sub && <p className="loading-sub">{sub}</p>}
-        <progress
-          className="loading-bar"
-          max={total > 0 ? total : 100}
-          value={total > 0 ? done : pct}
-        />
-        {total > 0 && (
-          <p className="loading-pct">{pct}%</p>
+        {indeterminate ? (
+          <progress className="loading-bar loading-bar-indeterminate" />
+        ) : (
+          <progress className="loading-bar" max={total} value={done} />
         )}
+        {pct !== null && <p className="loading-pct">{pct}%</p>}
       </div>
     </div>
   );

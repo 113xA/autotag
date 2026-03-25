@@ -104,6 +104,9 @@ pub struct LookupInput {
     pub path: String,
     pub artist: String,
     pub title: String,
+    /// Raw file stem (before cleaning); drives optional iTunes filename hints.
+    #[serde(default)]
+    pub filename_stem: String,
 }
 
 #[derive(Debug, Serialize)]
