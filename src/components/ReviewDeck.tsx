@@ -1,4 +1,10 @@
-import { motion, useMotionValue, useTransform, animate } from "framer-motion";
+import {
+  motion,
+  useMotionValue,
+  useReducedMotion,
+  useTransform,
+  animate,
+} from "framer-motion";
 import { memo, useEffect, useRef, useState } from "react";
 import { previewRename, readEmbeddedCoverPreview } from "../api/tauri";
 import type { RenameSettings } from "../options/types";
@@ -90,6 +96,7 @@ function ReviewDeckInner({
   onDeclineAutoCoverSearch,
   rename,
 }: Props) {
+  const reduceMotion = useReducedMotion();
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-200, 200], [-8, 8]);
   const acceptOpacity = useTransform(x, [0, 80], [0, 1]);
@@ -166,20 +173,6 @@ function ReviewDeckInner({
     proposed.album,
     proposed.year,
   ]);
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "ArrowRight") {
-        e.preventDefault();
-        onAccept();
-      } else if (e.key === "ArrowLeft") {
-        e.preventDefault();
-        onSkip();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onAccept, onSkip]);
 
   const n = track.candidates.length;
   const currentName = track.fileName || basename(track.path);
@@ -281,7 +274,13 @@ function ReviewDeckInner({
       <div className="deck-hint deck-hint-pill">
         Drag right to accept, left to skip — or use Arrow Right / Arrow Left.
       </div>
-      <div className="review-card">
+      <motion.div
+        className="review-card"
+        key={`${track.path}-${track.candidateIndex}`}
+        initial={reduceMotion ? false : { opacity: 0, y: 16, scale: 0.988 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
+      >
         <motion.div
           className="card-swipe-surface"
           style={{ x, rotate }}
@@ -540,7 +539,7 @@ function ReviewDeckInner({
             Accept
           </button>
         </div>
-      </div>
+      </motion.div>
     </div>
   );
 }

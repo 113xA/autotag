@@ -18,8 +18,10 @@ import { LoadingOverlay } from "./components/LoadingOverlay";
 import { CleanFilenamesPage } from "./components/CleanFilenamesPage";
 import { Logo } from "./components/Logo";
 import { OptionsMenu } from "./components/OptionsMenu";
+import { ApplyDonePanel } from "./components/ApplyDonePanel";
 import { RekordboxXmlPage } from "./components/RekordboxXmlPage";
 import { ReviewDeck } from "./components/ReviewDeck";
+import { ReviewToolbar } from "./components/ReviewToolbar";
 import { useAutotagSession } from "./hooks/useAutotagSession";
 import { useLookupActions } from "./hooks/useLookupActions";
 import { useLookupEvents } from "./hooks/useLookupEvents";
@@ -27,6 +29,7 @@ import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
 import type { AppSettings, RenameSettings } from "./options/types";
 import type {
+  ApplyOutcome,
   ApplyPayload,
   ProposedTags,
   ReviewTrack,
@@ -153,9 +156,9 @@ export default function App() {
   const [working, setWorking] = useState<ProposedTags | null>(null);
   const [longTask, setLongTask] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [applyOutcomes, setApplyOutcomes] = useState<
-    { path: string; ok: boolean; error: string | null }[] | null
-  >(null);
+  const [applyOutcomes, setApplyOutcomes] = useState<ApplyOutcome[] | null>(
+    null,
+  );
   const [acceptedPayloads, setAcceptedPayloads] = useState<ApplyPayload[]>([]);
   const [lookupProgress, setLookupProgress] = useState<LookupProgressState>({
     active: false,
@@ -163,6 +166,7 @@ export default function App() {
     total: 0,
   });
   const [lookupCurrentPath, setLookupCurrentPath] = useState<string | null>(null);
+  const [keywordSearch, setKeywordSearch] = useState("");
   const [singleLookupPath, setSingleLookupPath] = useState<string | null>(null);
   const [backgroundCoverLookup, setBackgroundCoverLookup] =
     useState<BackgroundCoverLookupState>({
@@ -421,9 +425,10 @@ export default function App() {
           if (lookupRunIdRef.current !== runId) return;
           setError(String(e));
         } finally {
-          if (lookupRunIdRef.current !== runId) return;
-          setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
-          setLookupCurrentPath(null);
+          if (lookupRunIdRef.current === runId) {
+            setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+            setLookupCurrentPath(null);
+          }
         }
       })();
     } catch (e) {
@@ -482,9 +487,10 @@ export default function App() {
         if (lookupRunIdRef.current !== runId) return;
         setError(String(e));
       } finally {
-        if (lookupRunIdRef.current !== runId) return;
-        setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
-        setLookupCurrentPath(null);
+        if (lookupRunIdRef.current === runId) {
+          setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+          setLookupCurrentPath(null);
+        }
       }
     })();
   };
@@ -520,6 +526,21 @@ export default function App() {
     working?.title,
     rerunSingleLookup,
   ]);
+
+  const handleRunKeywordSearch = useCallback(() => {
+    if (!current) return;
+    const q = keywordSearch.trim();
+    if (!q) {
+      setError("Type keywords first (artist/title).");
+      return;
+    }
+    setError(null);
+    coverAutoSearchDeclinedRef.current.delete(
+      `${current.path}:${current.candidateIndex}`,
+    );
+    setWorking((w) => (w ? { ...w, explicitlyNoCover: false } : w));
+    void rerunSingleLookup(current.path, q, q, current.filenameStem);
+  }, [current, keywordSearch, rerunSingleLookup]);
 
   const handleDeclineAutoCoverSearch = useCallback(
     (path: string, candidateIndex: number) => {
@@ -891,6 +912,9 @@ export default function App() {
     setSavedSession(null);
   };
 
+  const mainSurfaceKey =
+    view === "autotag" ? (`autotag-${phase}` as const) : view;
+
   const coverProgressTotal = useMemo(() => tracks.length * 4, [tracks]);
   const coverProgressDone = useMemo(
     () =>
@@ -930,6 +954,15 @@ export default function App() {
     if (!anchor) return;
     const ae = document.activeElement;
     if (
+      ae instanceof HTMLElement &&
+      (ae.isContentEditable ||
+        ae instanceof HTMLButtonElement ||
+        ae instanceof HTMLAnchorElement ||
+        ae.closest("[data-no-review-refocus]"))
+    ) {
+      return;
+    }
+    if (
       ae instanceof HTMLInputElement ||
       ae instanceof HTMLTextAreaElement ||
       ae instanceof HTMLSelectElement
@@ -949,7 +982,7 @@ export default function App() {
           <div className="header-row">
             <div className="brand-row">
               <div className="brand-mark">
-                <Logo className="brand-logo" size={48} />
+                <Logo className="brand-logo" />
               </div>
               <div className="brand-block">
                 <span className="brand-badge">Music library</span>
@@ -1006,6 +1039,7 @@ export default function App() {
           onChange={updateSettings}
         />
 
+        <div className="app-main-surface" key={mainSurfaceKey}>
         {view === "home" && (
           <section className="panel panel-hero">
             <p className="muted import-hint">
@@ -1108,88 +1142,29 @@ export default function App() {
 
         {view === "autotag" && phase === "review" && (
           <div className="autotag-review-workspace">
-            <section className="toolbar">
-              <div className="toolbar-inner">
-                <span className="stat stat-pill">
-                  <strong>{tracks.length}</strong> files
-                  <span className="stat-divider" aria-hidden="true" />
-                  <strong>{pendingCount}</strong> left
-                </span>
-                {lookupProgress.active && lookupProgress.total > 0 && (
-                  <div className="lookup-progress" aria-live="polite">
-                    <span className="lookup-progress-label">Lookup progress</span>
-                    <progress
-                      className="lookup-progress-bar"
-                      max={lookupProgress.total}
-                      value={Math.min(lookupProgress.done, lookupProgress.total)}
-                    />
-                    <span className="lookup-progress-text">
-                      {Math.min(lookupProgress.done, lookupProgress.total)} /{" "}
-                      {lookupProgress.total}
-                    </span>
-                  </div>
-                )}
-                {backgroundCoverLookup.active && backgroundCoverLookup.total > 0 && (
-                  <div className="lookup-progress lookup-progress-bg" aria-live="polite">
-                    <span className="lookup-progress-label">Background cover search</span>
-                    <progress
-                      className="lookup-progress-bar"
-                      max={backgroundCoverLookup.total}
-                      value={Math.min(
-                        backgroundCoverLookup.done,
-                        backgroundCoverLookup.total,
-                      )}
-                    />
-                    <span className="lookup-progress-text">
-                      {Math.min(backgroundCoverLookup.done, backgroundCoverLookup.total)} /{" "}
-                      {backgroundCoverLookup.total}
-                    </span>
-                  </div>
-                )}
-                {coverProgressTotal > 0 && (
-                  <div className="lookup-progress" aria-live="polite">
-                    <span className="lookup-progress-label">Covers loaded</span>
-                    <progress
-                      className="lookup-progress-bar"
-                      max={coverProgressTotal}
-                      value={Math.min(coverProgressDone, coverProgressTotal)}
-                    />
-                    <span className="lookup-progress-text">
-                      {Math.min(coverProgressDone, coverProgressTotal)} /{" "}
-                      {coverProgressTotal}
-                    </span>
-                  </div>
-                )}
-                <div className="toolbar-actions">
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    onClick={handleGoBackReview}
-                    disabled={longTask || !canReviewGoBack}
-                    title="Restore the last track you accepted or skipped"
-                    aria-label="Go back to previous track"
-                  >
-                    Back
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
-                    Re-run lookup
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-secondary"
-                    data-no-review-refocus
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    Options
-                  </button>
-                </div>
-              </div>
-              {lookupProgress.active && lookupCurrentPath && (
-                <div className="muted" style={{ marginTop: "0.45rem", fontSize: "0.78rem" }}>
-                  Current lookup: {lookupCurrentPath}
-                </div>
-              )}
-            </section>
+            <ReviewToolbar
+              totalFiles={tracks.length}
+              pendingCount={pendingCount}
+              lookupProgress={lookupProgress}
+              backgroundCoverLookup={backgroundCoverLookup}
+              coverProgressTotal={coverProgressTotal}
+              coverProgressDone={coverProgressDone}
+              longTask={longTask}
+              canReviewGoBack={canReviewGoBack}
+              onGoBackReview={handleGoBackReview}
+              onRunLookup={runLookup}
+              keywordSearch={keywordSearch}
+              setKeywordSearch={setKeywordSearch}
+              onRunKeywordSearch={handleRunKeywordSearch}
+              keywordSearchDisabled={
+                longTask ||
+                !current ||
+                keywordSearch.trim().length === 0 ||
+                singleLookupPath === current.path
+              }
+              setSettingsOpen={setSettingsOpen}
+              lookupCurrentPath={lookupCurrentPath}
+            />
 
             <div className="banner-slot" aria-live="polite">
               {error && <div className="banner error">{error}</div>}
@@ -1276,33 +1251,13 @@ export default function App() {
         )}
 
         {view === "autotag" && phase === "apply_done" && applyOutcomes && (
-          <section className="panel panel-done">
-            <h2 className="panel-title">Apply finished</h2>
-            <ul className="outcomes">
-              {applyOutcomes.map((o) => (
-                <li key={o.path} className={o.ok ? "ok" : "bad"}>
-                  <span className="path">{o.path}</span>
-                  {o.ok ? (
-                    <span>OK</span>
-                  ) : (
-                    <span className="err">{o.error}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-            <button type="button" className="btn primary" onClick={resetImport}>
-              New session
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setView("home")}
-              style={{ marginLeft: "0.5rem" }}
-            >
-              Back to home
-            </button>
-          </section>
+          <ApplyDonePanel
+            applyOutcomes={applyOutcomes}
+            onResetImport={resetImport}
+            setView={setView}
+          />
         )}
+        </div>
         </div>
       </div>
     </div>

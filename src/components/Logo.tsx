@@ -2,14 +2,17 @@ import type { SVGProps } from "react";
 
 export type LogoProps = SVGProps<SVGSVGElement> & { size?: number };
 
-export function Logo({ size = 48, width, height, ...props }: LogoProps) {
+export function Logo({ size, width, height, ...props }: LogoProps) {
+  const explicit = width != null || height != null || size != null;
+  const w = explicit ? (width ?? size ?? 48) : "100%";
+  const h = explicit ? (height ?? size ?? 48) : "100%";
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 48 48"
       fill="none"
-      width={width ?? size}
-      height={height ?? size}
+      width={w}
+      height={h}
       aria-hidden="true"
       {...props}
     >

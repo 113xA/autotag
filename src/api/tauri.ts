@@ -177,3 +177,51 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
     explicitlyNoCover: false,
   };
 }
+
+export type LibraryIndexResult = {
+  indexed: number;
+};
+
+export type LibraryImportResult = {
+  rowsWithPath: number;
+  portableRows: number;
+};
+
+export async function libraryIndexFolder(
+  path: string,
+  cleaning: CleaningOptions,
+): Promise<LibraryIndexResult> {
+  return invoke<LibraryIndexResult>("library_index_folder", { path, cleaning });
+}
+
+export async function libraryCatalogCount(): Promise<number> {
+  return invoke<number>("library_catalog_count");
+}
+
+export async function libraryPortablePendingCount(): Promise<number> {
+  return invoke<number>("library_portable_pending_count");
+}
+
+export async function libraryExportFile(
+  filePath: string,
+  includePaths: boolean,
+  includeFileName: boolean,
+): Promise<void> {
+  return invoke<void>("library_export_file", {
+    file_path: filePath,
+    include_paths: includePaths,
+    include_file_name: includeFileName,
+  });
+}
+
+export async function libraryImportFile(
+  filePath: string,
+): Promise<LibraryImportResult> {
+  return invoke<LibraryImportResult>("library_import_file", {
+    file_path: filePath,
+  });
+}
+
+export async function libraryClearCatalog(): Promise<void> {
+  return invoke<void>("library_clear_catalog");
+}

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateA
 import { loadSessionSnapshot, saveSessionSnapshot } from "../api/tauri";
 import { saveSettings } from "../options/storage";
 import type { AppSettings } from "../options/types";
-import type { ApplyPayload, ProposedTags, ReviewTrack } from "../types";
+import type { ApplyOutcome, ApplyPayload, ProposedTags, ReviewTrack } from "../types";
 
 type Phase = "import" | "review" | "apply_done";
 type PageView = "home" | "autotag" | "clean_names" | "rekordbox_xml";
@@ -20,7 +20,7 @@ export type SessionSnapshot = {
   tracks: ReviewTrack[];
   working: ProposedTags | null;
   error: string | null;
-  applyOutcomes: { path: string; ok: boolean; error: string | null }[] | null;
+  applyOutcomes: ApplyOutcome[] | null;
   acceptedPayloads: ApplyPayload[];
   lookupProgress: LookupProgressState;
 };
@@ -33,7 +33,7 @@ type UseAutotagSessionArgs = {
   tracks: ReviewTrack[];
   working: ProposedTags | null;
   error: string | null;
-  applyOutcomes: { path: string; ok: boolean; error: string | null }[] | null;
+  applyOutcomes: ApplyOutcome[] | null;
   acceptedPayloads: ApplyPayload[];
   lookupProgress: LookupProgressState;
   setView: Dispatch<SetStateAction<PageView>>;
@@ -43,12 +43,34 @@ type UseAutotagSessionArgs = {
   setTracks: Dispatch<SetStateAction<ReviewTrack[]>>;
   setWorking: Dispatch<SetStateAction<ProposedTags | null>>;
   setError: Dispatch<SetStateAction<string | null>>;
-  setApplyOutcomes: Dispatch<SetStateAction<{ path: string; ok: boolean; error: string | null }[] | null>>;
+  setApplyOutcomes: Dispatch<SetStateAction<ApplyOutcome[] | null>>;
   setAcceptedPayloads: Dispatch<SetStateAction<ApplyPayload[]>>;
   setLookupProgress: Dispatch<SetStateAction<LookupProgressState>>;
 };
 
 export function useAutotagSession(args: UseAutotagSessionArgs) {
+  const {
+    view,
+    phase,
+    folder,
+    settings,
+    tracks,
+    working,
+    error,
+    applyOutcomes,
+    acceptedPayloads,
+    lookupProgress,
+    setView,
+    setPhase,
+    setFolder,
+    setSettings,
+    setTracks,
+    setWorking,
+    setError,
+    setApplyOutcomes,
+    setAcceptedPayloads,
+    setLookupProgress,
+  } = args;
   const [savedSession, setSavedSession] = useState<SessionSnapshot | null>(null);
   const [resumeChecked, setResumeChecked] = useState(false);
   const autosaveTimerRef = useRef<number | null>(null);
@@ -70,18 +92,29 @@ export function useAutotagSession(args: UseAutotagSessionArgs) {
   }, []);
 
   const applySnapshot = useCallback((snap: SessionSnapshot) => {
-    args.setView(snap.view);
-    args.setPhase(snap.phase);
-    args.setFolder(snap.folder);
-    args.setSettings(snap.settings);
+    setView(snap.view);
+    setPhase(snap.phase);
+    setFolder(snap.folder);
+    setSettings(snap.settings);
     saveSettings(snap.settings);
-    args.setTracks(snap.tracks);
-    args.setWorking(snap.working);
-    args.setError(snap.error);
-    args.setApplyOutcomes(snap.applyOutcomes);
-    args.setAcceptedPayloads(snap.acceptedPayloads);
-    args.setLookupProgress(snap.lookupProgress);
-  }, [args]);
+    setTracks(snap.tracks);
+    setWorking(snap.working);
+    setError(snap.error);
+    setApplyOutcomes(snap.applyOutcomes);
+    setAcceptedPayloads(snap.acceptedPayloads);
+    setLookupProgress(snap.lookupProgress);
+  }, [
+    setAcceptedPayloads,
+    setApplyOutcomes,
+    setError,
+    setFolder,
+    setLookupProgress,
+    setPhase,
+    setSettings,
+    setTracks,
+    setView,
+    setWorking,
+  ]);
 
   useEffect(() => {
     if (autosaveTimerRef.current !== null) {
@@ -89,16 +122,16 @@ export function useAutotagSession(args: UseAutotagSessionArgs) {
     }
     autosaveTimerRef.current = window.setTimeout(() => {
       const snapshot: SessionSnapshot = {
-        view: args.view,
-        phase: args.phase,
-        folder: args.folder,
-        settings: args.settings,
-        tracks: args.tracks,
-        working: args.working,
-        error: args.error,
-        applyOutcomes: args.applyOutcomes,
-        acceptedPayloads: args.acceptedPayloads,
-        lookupProgress: args.lookupProgress,
+        view,
+        phase,
+        folder,
+        settings,
+        tracks,
+        working,
+        error,
+        applyOutcomes,
+        acceptedPayloads,
+        lookupProgress,
       };
       void saveSessionSnapshot(snapshot).then(() => setSavedSession(snapshot));
     }, 2000);
@@ -108,16 +141,16 @@ export function useAutotagSession(args: UseAutotagSessionArgs) {
       }
     };
   }, [
-    args.acceptedPayloads,
-    args.applyOutcomes,
-    args.error,
-    args.folder,
-    args.lookupProgress,
-    args.phase,
-    args.settings,
-    args.tracks,
-    args.view,
-    args.working,
+    acceptedPayloads,
+    applyOutcomes,
+    error,
+    folder,
+    lookupProgress,
+    phase,
+    settings,
+    tracks,
+    view,
+    working,
   ]);
 
   return { savedSession, setSavedSession, resumeChecked, applySnapshot };

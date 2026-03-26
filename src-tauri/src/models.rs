@@ -175,6 +175,7 @@ pub struct ApplyPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyOutcome {
     pub path: String,
+    pub final_path: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
 }

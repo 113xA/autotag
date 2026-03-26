@@ -10,7 +10,7 @@ type MergeLookup = (results: {
   artistGuesses?: string[];
 }[]) => void;
 
-type Args = {
+type UseLookupActionsArgs = {
   matching: MatchingOptions;
   lookupRunIdRef: MutableRefObject<number>;
   setTracks: Dispatch<SetStateAction<ReviewTrack[]>>;
@@ -21,11 +21,24 @@ type Args = {
   working: ProposedTags | null;
 };
 
-export function useLookupActions(args: Args) {
+export function useLookupActions({
+  matching,
+  lookupRunIdRef,
+  setTracks,
+  setSingleLookupPath,
+  setError,
+  mergeLookupResults,
+  current,
+  working,
+}: UseLookupActionsArgs) {
   const bumpCandidate = useCallback((delta: number) => {
-    args.setTracks((ts) => {
-      const curPath = ts.find((t) => t.reviewStatus === "pending")?.path;
-      if (!curPath) return ts;
+    const curPath = current?.path;
+    if (!curPath) return;
+    setTracks((ts) => {
+      const active = ts.find(
+        (t) => t.path === curPath && t.reviewStatus === "pending",
+      );
+      if (!active) return ts;
       return ts.map((t) => {
         if (t.path !== curPath) return t;
         const n = t.candidates.length;
@@ -34,60 +47,66 @@ export function useLookupActions(args: Args) {
         return { ...t, candidateIndex: next };
       });
     });
-  }, [args]);
+  }, [current?.path, setTracks]);
 
   const rerunSingleLookup = useCallback(
     async (path: string, artist: string, title: string, filenameStem: string) => {
-      args.setSingleLookupPath(path);
+      setSingleLookupPath(path);
       try {
         const one = await batchLookup(
           [{ path, artist, title, filenameStem }],
-          args.matching,
-          args.lookupRunIdRef.current,
+          matching,
+          lookupRunIdRef.current,
         );
-        args.mergeLookupResults(one);
+        mergeLookupResults(one);
       } catch (e) {
-        args.setError(String(e));
+        setError(String(e));
       } finally {
-        args.setSingleLookupPath((prev) => (prev === path ? null : prev));
+        setSingleLookupPath((prev) => (prev === path ? null : prev));
       }
     },
-    [args],
+    [
+      lookupRunIdRef,
+      matching,
+      mergeLookupResults,
+      setError,
+      setSingleLookupPath,
+    ],
   );
 
   const rerunSingleMusicbrainz = useCallback(
     async (path: string, artist: string, title: string, filenameStem: string) => {
-      args.setSingleLookupPath(path);
+      setSingleLookupPath(path);
       try {
         const one = await musicbrainzLookupOne(
           { path, artist, title, filenameStem },
-          args.matching,
+          matching,
         );
-        args.mergeLookupResults([one]);
+        mergeLookupResults([one]);
       } catch (e) {
-        args.setError(String(e));
+        setError(String(e));
       } finally {
-        args.setSingleLookupPath((prev) => (prev === path ? null : prev));
+        setSingleLookupPath((prev) => (prev === path ? null : prev));
       }
     },
-    [args],
+    [matching, mergeLookupResults, setError, setSingleLookupPath],
   );
 
   const handleGuessArtist = useCallback(
     (artistGuess: string) => {
-      if (!args.current) return;
-      const title = args.working?.title?.trim() || args.current.cleaned.searchTitle;
-      void rerunSingleLookup(args.current.path, artistGuess, title, args.current.filenameStem);
+      if (!current) return;
+      const title = working?.title?.trim() || current.cleaned.searchTitle;
+      void rerunSingleLookup(current.path, artistGuess, title, current.filenameStem);
     },
-    [args.current, args.working?.title, rerunSingleLookup],
+    [current, rerunSingleLookup, working?.title],
   );
 
   const handleMusicbrainzLookup = useCallback(() => {
-    if (!args.current) return;
-    const artist = args.working?.artist?.trim() || args.current.cleaned.searchArtist;
-    const title = args.working?.title?.trim() || args.current.cleaned.searchTitle;
-    void rerunSingleMusicbrainz(args.current.path, artist, title, args.current.filenameStem);
-  }, [args.current, args.working?.artist, args.working?.title, rerunSingleMusicbrainz]);
+    if (!current) return;
+    const artist = working?.artist?.trim() || current.cleaned.searchArtist;
+    const title = working?.title?.trim() || current.cleaned.searchTitle;
+    void rerunSingleMusicbrainz(current.path, artist, title, current.filenameStem);
+  }, [current, rerunSingleMusicbrainz, working?.artist, working?.title]);
 
   return {
     bumpCandidate,

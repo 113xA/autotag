@@ -1,5 +1,16 @@
-import { useEffect, useRef, useState } from "react";
-import { previewRename, spotifyAuth, spotifyAuthBrowser } from "../api/tauri";
+import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  libraryCatalogCount,
+  libraryClearCatalog,
+  libraryExportFile,
+  libraryImportFile,
+  libraryIndexFolder,
+  libraryPortablePendingCount,
+  previewRename,
+  spotifyAuth,
+  spotifyAuthBrowser,
+} from "../api/tauri";
 import { EDM_PRESETS, GENRE_SUGGESTIONS, applyPreset } from "../options/presets";
 import type { AppSettings, RenameSeparator, RenameSettings } from "../options/types";
 
@@ -20,6 +31,7 @@ type PanelId =
   | "integrations"
   | "apply"
   | "rename"
+  | "library"
   | "advanced";
 
 const PANELS: {
@@ -58,6 +70,11 @@ const PANELS: {
     blurb: "Rename pattern used only when you apply accepted tracks.",
   },
   {
+    id: "library",
+    label: "Music library",
+    blurb: "Local catalog of tags and cleaning hints—export/import without filenames if you want.",
+  },
+  {
     id: "advanced",
     label: "Advanced",
     blurb: "Developer and troubleshooting options.",
@@ -68,8 +85,115 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
   const [panel, setPanel] = useState<PanelId>("general");
   const [renameExample, setRenameExample] = useState<string | null>(null);
   const [spotifyStatus, setSpotifyStatus] = useState<string | null>(null);
+  const [libCatalogCount, setLibCatalogCount] = useState<number | null>(null);
+  const [libPortableCount, setLibPortableCount] = useState<number | null>(null);
+  const [libMsg, setLibMsg] = useState<string | null>(null);
+  const [libBusy, setLibBusy] = useState(false);
+  const [exportIncludePaths, setExportIncludePaths] = useState(false);
+  const [exportIncludeFileName, setExportIncludeFileName] = useState(false);
   const modalRef = useRef<HTMLDivElement | null>(null);
   const previousFocusRef = useRef<Element | null>(null);
+  const wasOpenRef = useRef(false);
+
+  const refreshLibCatalog = useCallback(async () => {
+    try {
+      const [c, p] = await Promise.all([
+        libraryCatalogCount(),
+        libraryPortablePendingCount(),
+      ]);
+      setLibCatalogCount(c);
+      setLibPortableCount(p);
+    } catch {
+      setLibCatalogCount(null);
+      setLibPortableCount(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open || panel !== "library") return;
+    setLibMsg(null);
+    void refreshLibCatalog();
+  }, [open, panel, refreshLibCatalog]);
+
+  const handleLibraryIndex = async () => {
+    if (libBusy) return;
+    const dir = await openDialog({ directory: true, multiple: false });
+    if (!dir || Array.isArray(dir)) return;
+    setLibBusy(true);
+    setLibMsg(null);
+    try {
+      const r = await libraryIndexFolder(dir, settings.cleaning);
+      setLibMsg(`Indexed ${r.indexed} files into the local catalog.`);
+      await refreshLibCatalog();
+    } catch (e) {
+      setLibMsg(String(e));
+    } finally {
+      setLibBusy(false);
+    }
+  };
+
+  const handleLibraryExport = async () => {
+    if (libBusy) return;
+    const path = await save({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+      defaultPath: "library-catalog.json",
+    });
+    if (path == null) return;
+    setLibBusy(true);
+    setLibMsg(null);
+    try {
+      await libraryExportFile(path, exportIncludePaths, exportIncludeFileName);
+      setLibMsg("Catalog exported.");
+    } catch (e) {
+      setLibMsg(String(e));
+    } finally {
+      setLibBusy(false);
+    }
+  };
+
+  const handleLibraryImport = async () => {
+    if (libBusy) return;
+    const f = await openDialog({
+      multiple: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!f || Array.isArray(f)) return;
+    setLibBusy(true);
+    setLibMsg(null);
+    try {
+      const r = await libraryImportFile(f);
+      setLibMsg(
+        `Imported ${r.rowsWithPath} row(s) with path; ${r.portableRows} metadata-only (merged when you index matching tracks).`,
+      );
+      await refreshLibCatalog();
+    } catch (e) {
+      setLibMsg(String(e));
+    } finally {
+      setLibBusy(false);
+    }
+  };
+
+  const handleLibraryClear = async () => {
+    if (libBusy) return;
+    if (
+      !window.confirm(
+        "Clear the entire local music catalog (including pending portable imports)?",
+      )
+    ) {
+      return;
+    }
+    setLibBusy(true);
+    setLibMsg(null);
+    try {
+      await libraryClearCatalog();
+      setLibMsg("Catalog cleared.");
+      await refreshLibCatalog();
+    } catch (e) {
+      setLibMsg(String(e));
+    } finally {
+      setLibBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (open) setPanel("general");
@@ -77,7 +201,6 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    previousFocusRef.current = document.activeElement;
     const r = settings.rename;
     if (!r.enabled) {
       setRenameExample(null);
@@ -105,13 +228,20 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) {
-      if (previousFocusRef.current instanceof HTMLElement) {
-        previousFocusRef.current.focus();
-      } else {
-        const settingsBtn = document.querySelector(".settings-btn");
-        if (settingsBtn instanceof HTMLElement) settingsBtn.focus();
+      if (wasOpenRef.current) {
+        if (previousFocusRef.current instanceof HTMLElement) {
+          previousFocusRef.current.focus();
+        } else {
+          const settingsBtn = document.querySelector(".settings-btn");
+          if (settingsBtn instanceof HTMLElement) settingsBtn.focus();
+        }
       }
+      wasOpenRef.current = false;
       return;
+    }
+    if (!wasOpenRef.current) {
+      previousFocusRef.current = document.activeElement;
+      wasOpenRef.current = true;
     }
     modalRef.current?.focus();
     const onKeyDown = (e: KeyboardEvent) => {
@@ -210,6 +340,7 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
           <div className="options-panel">
             <p className="options-panel-intro">{active.blurb}</p>
             <div className="options-panel-scroll">
+              <div key={panel} className="options-panel-body">
               {panel === "general" && (
                 <>
                   <section className="opt-section opt-card">
@@ -986,6 +1117,103 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                 </section>
               )}
 
+              {panel === "library" && (
+                <section className="opt-section opt-card">
+                  <h3 className="opt-heading">Local music catalog</h3>
+                  <p className="opt-lead">
+                    SQLite database in app data: embedded tags, cleaned search strings, and a stable
+                    fingerprint per track. Use it as a full local library index and sync metadata
+                    between machines.
+                  </p>
+                  <p className="muted">
+                    Indexed tracks: <strong>{libCatalogCount ?? "—"}</strong>
+                    {" · "}
+                    Portable rows waiting for merge: <strong>{libPortableCount ?? "—"}</strong>
+                  </p>
+                  <div
+                    className="row"
+                    style={{ flexWrap: "wrap", gap: "0.5rem", marginTop: "0.75rem" }}
+                  >
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={libBusy}
+                      onClick={handleLibraryIndex}
+                    >
+                      Index folder into catalog
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={libBusy}
+                      onClick={() => void refreshLibCatalog()}
+                    >
+                      Refresh counts
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={libBusy}
+                      onClick={handleLibraryClear}
+                    >
+                      Clear catalog
+                    </button>
+                  </div>
+
+                  <h4 className="opt-heading" style={{ marginTop: "1.25rem" }}>
+                    Export JSON
+                  </h4>
+                  <p className="opt-lead">
+                    Uncheck both options for a portable file with metadata only (no path, no file
+                    name). Re-import that file, then index the same music folder here to merge rows
+                    by fingerprint.
+                  </p>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={exportIncludePaths}
+                      onChange={(e) => setExportIncludePaths(e.target.checked)}
+                    />
+                    Include file paths (same-machine backup / restore)
+                  </label>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={exportIncludeFileName}
+                      onChange={(e) => setExportIncludeFileName(e.target.checked)}
+                    />
+                    Include file name field
+                  </label>
+                  <div className="row" style={{ marginTop: "0.5rem" }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={libBusy}
+                      onClick={handleLibraryExport}
+                    >
+                      Export catalog…
+                    </button>
+                  </div>
+
+                  <h4 className="opt-heading" style={{ marginTop: "1.25rem" }}>
+                    Import JSON
+                  </h4>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={libBusy}
+                    onClick={handleLibraryImport}
+                  >
+                    Import catalog…
+                  </button>
+                  {libMsg && (
+                    <p className="muted" style={{ marginTop: "0.75rem" }} aria-live="polite">
+                      {libMsg}
+                    </p>
+                  )}
+                </section>
+              )}
+
               {panel === "advanced" && (
                 <section className="opt-section opt-card opt-section-danger">
                   <h3 className="opt-heading">Developer</h3>
@@ -1011,6 +1239,7 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                   </label>
                 </section>
               )}
+              </div>
             </div>
           </div>
         </div>

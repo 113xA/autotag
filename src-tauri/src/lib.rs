@@ -3,6 +3,7 @@ mod cover_art;
 mod deezer;
 mod filename_catalog;
 mod filename_clean;
+mod library_db;
 mod metadata;
 mod models;
 mod musicbrainz;
@@ -35,6 +36,7 @@ use crate::models::{
     SpotifyAuthResult,
 };
 use crate::musicbrainz::MbState;
+use crate::library_db::{LibraryImportResult, LibraryIndexResult};
 use crate::options::{
     ApplyMetadataOptions, CleaningOptions, MatchingOptions, ProgressPayload, RenameOptions,
 };
@@ -319,6 +321,68 @@ async fn clear_session_snapshot(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn library_index_folder(
+    app: tauri::AppHandle,
+    path: String,
+    cleaning: CleaningOptions,
+) -> Result<LibraryIndexResult, String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || library_db::index_folder_sync(&app2, path, cleaning))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_catalog_count(app: tauri::AppHandle) -> Result<u64, String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || library_db::catalog_count_sync(&app2))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_portable_pending_count(app: tauri::AppHandle) -> Result<u64, String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || library_db::portable_pending_count_sync(&app2))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_export_file(
+    app: tauri::AppHandle,
+    file_path: String,
+    include_paths: bool,
+    include_file_name: bool,
+) -> Result<(), String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || {
+        library_db::export_file_sync(&app2, file_path, include_paths, include_file_name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_import_file(
+    app: tauri::AppHandle,
+    file_path: String,
+) -> Result<LibraryImportResult, String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || library_db::import_file_sync(&app2, file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn library_clear_catalog(app: tauri::AppHandle) -> Result<(), String> {
+    let app2 = app.clone();
+    tokio::task::spawn_blocking(move || library_db::clear_catalog_sync(&app2))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn musicbrainz_lookup_one(
     state: tauri::State<'_, MbState>,
     item: LookupInput,
@@ -384,13 +448,15 @@ async fn apply_batch(
         let path = payload.path.clone();
         let res = apply_one(&client, payload, &meta, &rename).await;
         outcomes.push(match res {
-            Ok(()) => ApplyOutcome {
+            Ok(final_path) => ApplyOutcome {
                 path,
+                final_path: Some(final_path),
                 ok: true,
                 error: None,
             },
             Err(e) => ApplyOutcome {
                 path,
+                final_path: None,
                 ok: false,
                 error: Some(e),
             },
@@ -554,12 +620,14 @@ async fn apply_rekordbox_batch(
         .map_err(|e| e.to_string())?;
         outcomes.push(match res {
             Ok(()) => ApplyOutcome {
-                path,
+                path: path.clone(),
+                final_path: Some(path),
                 ok: true,
                 error: None,
             },
             Err(e) => ApplyOutcome {
                 path,
+                final_path: None,
                 ok: false,
                 error: Some(e),
             },
@@ -589,7 +657,7 @@ async fn apply_one(
     payload: ApplyPayload,
     meta: &ApplyMetadataOptions,
     rename: &RenameOptions,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let path_for_embedded = payload.path.clone();
     let (cover_bytes, mime_hint): (Option<Vec<u8>>, Option<String>) = if meta.embed_cover {
         if payload.remove_embedded_cover {
@@ -643,6 +711,7 @@ async fn apply_one(
     let rename = rename.clone();
 
     tokio::task::spawn_blocking(move || {
+        let mut final_path = path.clone();
         if meta.write_tags {
             write_tags(
                 &path,
@@ -673,9 +742,10 @@ async fn apply_one(
             )?;
             if new_path.as_path() != Path::new(&path) {
                 std::fs::rename(&path, &new_path).map_err(|e| e.to_string())?;
+                final_path = new_path.to_string_lossy().to_string();
             }
         }
-        Ok::<(), String>(())
+        Ok::<String, String>(final_path)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -705,7 +775,13 @@ pub fn run() {
             musicbrainz_lookup_one,
             read_embedded_cover_preview,
             match_rekordbox_library,
-            apply_rekordbox_batch
+            apply_rekordbox_batch,
+            library_index_folder,
+            library_catalog_count,
+            library_portable_pending_count,
+            library_export_file,
+            library_import_file,
+            library_clear_catalog
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

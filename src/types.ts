@@ -88,6 +88,7 @@ export type ProposedTags = {
 
 export type ApplyOutcome = {
   path: string;
+  finalPath?: string | null;
   ok: boolean;
   error: string | null;
 };
