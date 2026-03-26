@@ -65,6 +65,12 @@ pub struct MatchingOptions {
     pub use_youtube: bool,
     #[serde(default)]
     pub verbose_logs: bool,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u8,
+}
+
+fn default_concurrency() -> u8 {
+    4
 }
 
 impl Default for MatchingOptions {
@@ -80,6 +86,7 @@ impl Default for MatchingOptions {
             use_amazon: true,
             use_youtube: false,
             verbose_logs: false,
+            concurrency: 4,
         }
     }
 }

@@ -24,6 +24,17 @@ export type ScannedTrack = {
   current: TagSnapshot;
 };
 
+export type SkippedFile = {
+  path: string;
+  fileName: string;
+  reason: string;
+};
+
+export type ScanFolderResult = {
+  tracks: ScannedTrack[];
+  skipped: SkippedFile[];
+};
+
 export type ApplyPayload = {
   path: string;
   artist: string;
@@ -70,6 +81,7 @@ export type ReviewTrack = ScannedTrack & {
   candidateIndex: number;
   reviewStatus: "pending" | "accepted" | "skipped";
   confidence: "high" | "medium" | "low";
+  confidenceScore: number;
   artistGuesses: string[];
 };
 

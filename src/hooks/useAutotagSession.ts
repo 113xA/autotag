@@ -97,7 +97,12 @@ export function useAutotagSession(args: UseAutotagSessionArgs) {
     setFolder(snap.folder);
     setSettings(snap.settings);
     saveSettings(snap.settings);
-    setTracks(snap.tracks);
+    const migratedTracks = snap.tracks.map((t) =>
+      t.confidenceScore != null
+        ? t
+        : { ...t, confidenceScore: t.confidence === "high" ? 85 : t.confidence === "medium" ? 50 : 10 },
+    );
+    setTracks(migratedTracks);
     setWorking(snap.working);
     setError(snap.error);
     setApplyOutcomes(snap.applyOutcomes);

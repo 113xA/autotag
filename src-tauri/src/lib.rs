@@ -14,6 +14,7 @@ mod spotify;
 mod youtube;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rusqlite::{params, Connection};
@@ -32,8 +33,8 @@ use crate::metadata::{
 };
 use crate::models::{
     ApplyBatchRequest, ApplyOutcome, ApplyPayload, CleanRenameBatchRequest, CleanRenameOutcome,
-    LookupInput, LookupResult, RekordboxBatchRequest, RekordboxWriteOptions, ScannedTrack,
-    SpotifyAuthResult,
+    LookupInput, LookupResult, RekordboxBatchRequest, RekordboxWriteOptions, ScanFolderResult,
+    ScannedTrack, SkippedFile, SpotifyAuthResult, AUDIO_EXT,
 };
 use crate::musicbrainz::MbState;
 use crate::library_db::{LibraryImportResult, LibraryIndexResult};
@@ -43,7 +44,15 @@ use crate::options::{
 use crate::rekordbox_xml::{match_rekordbox_xml_to_paths, RekordboxMatchSummary};
 use crate::spotify::SpotifyState;
 
-const AUDIO_EXT: &[&str] = &["mp3", "flac", "m4a", "mp4", "ogg", "opus"];
+fn is_likely_audio_file(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mp3" | "flac" | "m4a" | "mp4" | "ogg" | "opus"
+            | "wav" | "aiff" | "aif" | "ape" | "wv" | "mpc" | "aac"
+            | "wma" | "dsf" | "dff" | "ac3" | "amr" | "mid" | "midi"
+            | "ra" | "ram" | "au" | "snd" | "caf" | "w64" | "tak"
+    )
+}
 
 fn emit_progress(app: &tauri::AppHandle, p: ProgressPayload) {
     let _ = app.emit("progress", p);
@@ -54,7 +63,7 @@ async fn scan_folder(
     app: tauri::AppHandle,
     path: String,
     cleaning: CleaningOptions,
-) -> Result<Vec<ScannedTrack>, String> {
+) -> Result<ScanFolderResult, String> {
     let app2 = app.clone();
     tokio::task::spawn_blocking(move || scan_folder_sync(app2, path, cleaning))
         .await
@@ -65,12 +74,13 @@ fn scan_folder_sync(
     app: tauri::AppHandle,
     path: String,
     cleaning: CleaningOptions,
-) -> Result<Vec<ScannedTrack>, String> {
+) -> Result<ScanFolderResult, String> {
     let root = Path::new(&path);
     if !root.is_dir() {
         return Err("not a directory".into());
     }
-    let mut paths = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut skipped: Vec<SkippedFile> = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
         let p = entry.path();
         if !p.is_file() {
@@ -83,10 +93,18 @@ fn scan_folder_sync(
         let Some(ext) = ext else {
             continue;
         };
-        if !AUDIO_EXT.contains(&ext.as_str()) {
-            continue;
+        if AUDIO_EXT.contains(&ext.as_str()) {
+            paths.push(p.to_path_buf());
+        } else if is_likely_audio_file(&ext) {
+            skipped.push(SkippedFile {
+                path: p.to_string_lossy().to_string(),
+                file_name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                reason: format!(".{} files are not supported for metadata tagging", ext),
+            });
         }
-        paths.push(p.to_path_buf());
     }
     paths.sort();
     let total = paths.len() as u32;
@@ -100,7 +118,10 @@ fn scan_folder_sync(
         },
     );
     if total == 0 {
-        return Ok(vec![]);
+        return Ok(ScanFolderResult {
+            tracks: vec![],
+            skipped,
+        });
     }
 
     let mut tracks = Vec::with_capacity(paths.len());
@@ -139,21 +160,23 @@ fn scan_folder_sync(
         }
     }
     tracks.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(tracks)
+    Ok(ScanFolderResult { tracks, skipped })
 }
 
 #[tauri::command]
 async fn batch_lookup(
     app: tauri::AppHandle,
-    state: tauri::State<'_, MbState>,
-    deezer: tauri::State<'_, deezer::DeezerState>,
-    spotify: tauri::State<'_, SpotifyState>,
-    amazon: tauri::State<'_, amazon::AmazonState>,
-    youtube: tauri::State<'_, youtube::YoutubeState>,
+    state: tauri::State<'_, Arc<MbState>>,
+    deezer: tauri::State<'_, Arc<deezer::DeezerState>>,
+    spotify: tauri::State<'_, Arc<SpotifyState>>,
+    amazon: tauri::State<'_, Arc<amazon::AmazonState>>,
+    youtube: tauri::State<'_, Arc<youtube::YoutubeState>>,
     items: Vec<LookupInput>,
     matching: MatchingOptions,
     run_id: u64,
 ) -> Result<Vec<LookupResult>, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     #[derive(Serialize, Clone)]
     struct LookupResultEvent<'a> {
         run_id: u64,
@@ -161,6 +184,7 @@ async fn batch_lookup(
     }
 
     let total = items.len() as u32;
+    let concurrency = (matching.concurrency.max(1).min(12)) as usize;
     emit_progress(
         &app,
         ProgressPayload {
@@ -172,69 +196,77 @@ async fn batch_lookup(
     );
     if matching.verbose_logs {
         eprintln!(
-            "[batch_lookup] start total={} items kind=lookup",
-            total
+            "[batch_lookup] start total={} concurrency={} kind=lookup",
+            total, concurrency
         );
     }
     let client = state.client.clone();
-    let mut results = Vec::with_capacity(items.len());
-    for (i, item) in items.iter().enumerate() {
-        let started = Instant::now();
-        if matching.verbose_logs {
-            eprintln!(
-                "[batch_lookup] ({}/{}) start path={}",
-                i + 1,
-                total,
-                item.path
-            );
-        }
-        let one = smart_lookup::smart_lookup_one(
-            &state,
-            &client,
-            &deezer,
-            &spotify,
-            &amazon,
-            &youtube,
-            item,
-            &matching,
-        )
-        .await?;
+    let done_counter = std::sync::Arc::new(AtomicU32::new(0));
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
 
-        let _ = app.emit(
-            "lookup_result",
-            LookupResultEvent {
-                run_id,
-                result: &one,
-            },
-        );
-
-        results.push(one);
-        if matching.verbose_logs {
-            eprintln!(
-                "[batch_lookup] ({}/{}) done path={} candidates={} coverOptionsFirst={:?} elapsedMs={}",
-                i + 1,
-                total,
-                item.path,
-                results
-                    .last()
-                    .map(|r| r.candidates.len())
-                    .unwrap_or(0),
-                results
-                    .last()
-                    .and_then(|r| r.candidates.first())
-                    .map(|c| c.cover_options.len()),
-                started.elapsed().as_millis()
+    let mut handles = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        let client = client.clone();
+        let app = app.clone();
+        let matching = matching.clone();
+        let sem = semaphore.clone();
+        let counter = done_counter.clone();
+        let st = Arc::clone(&state);
+        let dz = Arc::clone(&deezer);
+        let sp = Arc::clone(&spotify);
+        let am = Arc::clone(&amazon);
+        let yt = Arc::clone(&youtube);
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let started = Instant::now();
+            if matching.verbose_logs {
+                eprintln!(
+                    "[batch_lookup] ({}/{}) start path={}",
+                    i + 1, total, item.path
+                );
+            }
+            let one = smart_lookup::smart_lookup_one(
+                &st, &client, &dz, &sp, &am, &yt, &item, &matching,
+            )
+            .await;
+            let done = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if matching.verbose_logs {
+                eprintln!(
+                    "[batch_lookup] ({}/{}) done path={} ok={} elapsedMs={}",
+                    done, total, item.path, one.is_ok(), started.elapsed().as_millis()
+                );
+            }
+            emit_progress(
+                &app,
+                ProgressPayload {
+                    kind: "lookup".into(),
+                    done,
+                    total,
+                    message: Some(item.path.clone()),
+                },
             );
-        }
-        emit_progress(
-            &app,
-            ProgressPayload {
-                kind: "lookup".into(),
-                done: (i + 1) as u32,
-                total,
-                message: Some(item.path.clone()),
-            },
-        );
+            if let Ok(ref result) = one {
+                let _ = app.emit(
+                    "lookup_result",
+                    LookupResultEvent {
+                        run_id,
+                        result,
+                    },
+                );
+            }
+            (i, one)
+        }));
+    }
+
+    let mut indexed_results = Vec::with_capacity(handles.len());
+    for h in handles {
+        indexed_results.push(h.await.map_err(|e| e.to_string())?);
+    }
+    indexed_results.sort_by_key(|(i, _)| *i);
+
+    let mut results = Vec::with_capacity(indexed_results.len());
+    for (_i, res) in indexed_results {
+        results.push(res?);
     }
     if matching.verbose_logs {
         eprintln!("[batch_lookup] done total={}", total);
@@ -384,7 +416,7 @@ async fn library_clear_catalog(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 async fn musicbrainz_lookup_one(
-    state: tauri::State<'_, MbState>,
+    state: tauri::State<'_, Arc<MbState>>,
     item: LookupInput,
     matching: MatchingOptions,
 ) -> Result<LookupResult, String> {
@@ -393,8 +425,8 @@ async fn musicbrainz_lookup_one(
 
 #[tauri::command]
 async fn spotify_auth(
-    state: tauri::State<'_, MbState>,
-    spotify: tauri::State<'_, SpotifyState>,
+    state: tauri::State<'_, Arc<MbState>>,
+    spotify: tauri::State<'_, Arc<SpotifyState>>,
     client_id: String,
     client_secret: String,
 ) -> Result<SpotifyAuthResult, String> {
@@ -413,8 +445,8 @@ async fn spotify_auth(
 
 #[tauri::command]
 async fn spotify_auth_browser(
-    state: tauri::State<'_, MbState>,
-    spotify: tauri::State<'_, SpotifyState>,
+    state: tauri::State<'_, Arc<MbState>>,
+    spotify: tauri::State<'_, Arc<SpotifyState>>,
     client_id: String,
 ) -> Result<SpotifyAuthResult, String> {
     let expires_in = spotify::auth_browser_pkce(&spotify, &state.client, &client_id).await?;
@@ -427,7 +459,7 @@ async fn spotify_auth_browser(
 #[tauri::command]
 async fn apply_batch(
     app: tauri::AppHandle,
-    state: tauri::State<'_, MbState>,
+    state: tauri::State<'_, Arc<MbState>>,
     req: ApplyBatchRequest,
 ) -> Result<Vec<ApplyOutcome>, String> {
     let client = state.client.clone();
@@ -756,11 +788,11 @@ pub fn run() {
     let mb = MbState::new().expect("MusicBrainz HTTP client");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(mb)
-        .manage(deezer::DeezerState::new())
-        .manage(SpotifyState::new())
-        .manage(amazon::AmazonState::new())
-        .manage(youtube::YoutubeState::new())
+        .manage(Arc::new(mb))
+        .manage(Arc::new(deezer::DeezerState::new()))
+        .manage(Arc::new(SpotifyState::new()))
+        .manage(Arc::new(amazon::AmazonState::new()))
+        .manage(Arc::new(youtube::YoutubeState::new()))
         .invoke_handler(tauri::generate_handler![
             scan_folder,
             batch_lookup,

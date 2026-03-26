@@ -10,7 +10,7 @@ import type {
   RekordboxMatchSummary,
   RekordboxWriteOptions,
   ReviewTrack,
-  ScannedTrack,
+  ScanFolderResult,
 } from "../types";
 import type {
   ApplyMetadataOptions,
@@ -22,8 +22,8 @@ import type {
 export async function scanFolder(
   path: string,
   cleaning: CleaningOptions,
-): Promise<ScannedTrack[]> {
-  return invoke<ScannedTrack[]>("scan_folder", { path, cleaning });
+): Promise<ScanFolderResult> {
+  return invoke<ScanFolderResult>("scan_folder", { path, cleaning });
 }
 
 /** Data URL for embedded front cover, or null if none / too large. */

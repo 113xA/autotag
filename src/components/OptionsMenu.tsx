@@ -723,6 +723,31 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                     </label>
                   </div>
 
+                  <label className="field">
+                    <span>Parallel lookups</span>
+                    <p className="opt-field-desc">
+                      Number of tracks looked up simultaneously. Higher values are faster but use
+                      more network bandwidth. Recommended: 2–6.
+                    </p>
+                    <input
+                      type="range"
+                      min={1}
+                      max={8}
+                      step={1}
+                      value={s.matching.concurrency}
+                      onChange={(e) =>
+                        onChange({
+                          ...s,
+                          matching: {
+                            ...s.matching,
+                            concurrency: Number(e.target.value),
+                          },
+                        })
+                      }
+                    />
+                    <span className="range-value">{s.matching.concurrency} threads</span>
+                  </label>
+
                   <h4 className="opt-subheading">Spotify app</h4>
                   <p className="opt-hint">
                     Create an app in the Spotify Developer Dashboard, add the redirect URI below,
@@ -896,6 +921,38 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                         }
                       />
                       Auto-apply when all tracks have been reviewed (skips confirmation)
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={s.autoAcceptHighConfidence}
+                        onChange={(e) =>
+                          onChange({ ...s, autoAcceptHighConfidence: e.target.checked })
+                        }
+                      />
+                      Auto-accept high-confidence matches (skip review for near-perfect matches)
+                    </label>
+                    <label className="field">
+                      <span>Auto-accept confidence threshold</span>
+                      <p className="opt-field-desc">
+                        Tracks at or above this confidence score are auto-accepted in the
+                        background when auto-accept mode is enabled.
+                      </p>
+                      <input
+                        type="range"
+                        min={70}
+                        max={100}
+                        step={1}
+                        value={s.autoAcceptConfidenceThreshold}
+                        onChange={(e) =>
+                          onChange({
+                            ...s,
+                            autoAcceptConfidenceThreshold: Number(e.target.value),
+                          })
+                        }
+                        disabled={!s.autoAcceptHighConfidence}
+                      />
+                      <span className="range-value">{s.autoAcceptConfidenceThreshold}%</span>
                     </label>
                   </div>
                   <label className="field">

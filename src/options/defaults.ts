@@ -27,6 +27,7 @@ export const defaultMatching = (): AppSettings["matching"] => ({
   useAmazon: true,
   useYoutube: false,
   verboseLogs: false,
+  concurrency: 4,
 });
 
 export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({
@@ -55,6 +56,8 @@ export const defaultAppSettings = (): AppSettings => ({
   applyMeta: defaultApplyMeta(),
   autoLookupOnImport: true,
   autoApplyOnComplete: false,
+  autoAcceptHighConfidence: false,
+  autoAcceptConfidenceThreshold: 90,
   rename: defaultRename(),
   spotifyClientId: null,
   spotifyClientSecret: null,

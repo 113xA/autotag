@@ -27,12 +27,16 @@ type Props = {
   onGuessArtist: (artist: string) => void;
   onSwapArtistTitle: () => void;
   onMusicbrainzLookup: () => void;
-  /** Multi-source cover search; also runs automatically when no art exists yet. */
   onSearchNewCovers: () => void;
-  /** User chose no cover for this path/match — skip auto cover lookup for it. */
   onDeclineAutoCoverSearch?: (path: string, candidateIndex: number) => void;
   rename: RenameSettings;
 };
+
+function confidenceBarColor(score: number): string {
+  if (score >= 80) return "var(--good)";
+  if (score >= 50) return "var(--warn)";
+  return "var(--bad)";
+}
 
 function basename(p: string): string {
   const s = p.replace(/\\/g, "/");
@@ -53,14 +57,16 @@ function Field({
   onChange: (v: string) => void;
   name: string;
 }) {
+  const inputId = `field-proposed-${name}`;
   return (
     <div className="field-row">
-      <span className="field-label">{label}</span>
+      <label htmlFor={inputId} className="field-label">{label}</label>
       <div className="field-cols">
         <div className="field-current" title="Current file tags">
           {current || "—"}
         </div>
         <input
+          id={inputId}
           className="field-proposed"
           name={name}
           value={proposed}
@@ -238,6 +244,11 @@ function ReviewDeckInner({
             null;
   const coverSrc =
     !heroCoverUrl || coverFailed ? PLACEHOLDER_COVER : heroCoverUrl;
+  const [coverExpanded, setCoverExpanded] = useState(false);
+
+  useEffect(() => {
+    setCoverExpanded(false);
+  }, [track.path, track.candidateIndex]);
 
   const hasAnyCoverArt =
     Boolean(proposed.coverUrl?.trim()) ||
@@ -296,27 +307,30 @@ function ReviewDeckInner({
             Skip
           </motion.div>
 
-          <div className="card-cover">
-            <img
-              src={coverSrc}
-              alt=""
-              className="cover-img"
-              onError={() => setCoverFailed(true)}
-            />
-          </div>
-
           <div className="card-path" title={track.path}>
             {track.path}
           </div>
         </motion.div>
 
         <div className="file-rename-block">
-          <div className={`confidence-pill ${track.confidence}`}>
-            {track.confidence === "high"
-              ? "High confidence"
-              : track.confidence === "medium"
-                ? "Needs confirmation"
-                : "Manual check"}
+          <div className="confidence-row">
+            <div className={`confidence-pill ${track.confidence}`}>
+              {track.confidence === "high"
+                ? "High confidence"
+                : track.confidence === "medium"
+                  ? "Needs confirmation"
+                  : "Manual check"}
+            </div>
+            <div className="confidence-bar-wrap" title={`Confidence: ${track.confidenceScore}%`}>
+              <div
+                className="confidence-bar-fill"
+                style={{
+                  width: `${track.confidenceScore}%`,
+                  backgroundColor: confidenceBarColor(track.confidenceScore),
+                }}
+              />
+              <span className="confidence-bar-label">{track.confidenceScore}%</span>
+            </div>
           </div>
           {track.confidence === "medium" && track.artistGuesses.length > 0 && (
             <div className="guess-chip-row">
@@ -333,7 +347,7 @@ function ReviewDeckInner({
             </div>
           )}
           {track.confidence === "low" && (
-            <div className="row" style={{ marginTop: "0.4rem", marginBottom: "0.4rem" }}>
+            <div className="row low-confidence-actions">
               <button type="button" className="btn btn-secondary" onClick={onSwapArtistTitle}>
                 Swap artist/title
               </button>
@@ -351,12 +365,26 @@ function ReviewDeckInner({
               <span className="muted">Unchanged (enable rename in settings)</span>
             )}
           </div>
+          <div className="cover-section-row">
+          <div className="cover-thumb-wrap">
+            <img
+              src={coverSrc}
+              alt=""
+              className="cover-thumb-img"
+              onError={() => setCoverFailed(true)}
+            />
+            <button
+              type="button"
+              className="cover-expand-btn"
+              onClick={() => setCoverExpanded(true)}
+              title="View full size"
+              aria-label="Expand cover art"
+            >
+              ⤢
+            </button>
+          </div>
           <div className="cover-options-block">
             <div className="cover-options-title">Cover proposals</div>
-            <p className="cover-options-hint">
-              If this match has no art yet, extra sources are searched automatically.
-              Use the button below to search again anytime.
-            </p>
             <div className="row cover-actions-row">
               <button
                 type="button"
@@ -409,7 +437,7 @@ function ReviewDeckInner({
                 })}
               </div>
             ) : (
-              <div className="muted" style={{ marginTop: "0.35rem" }}>
+              <div className="muted cover-no-results">
                 {coverSearchActive ? "Searching for covers..." : "No covers found yet"}
               </div>
             )}
@@ -428,7 +456,23 @@ function ReviewDeckInner({
               />
             )}
           </div>
-          <div className="row" style={{ marginTop: "0.45rem" }}>
+          </div>
+          {coverExpanded && (
+            <div className="cover-lightbox" onClick={() => setCoverExpanded(false)}>
+              <div className="cover-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+                <img src={coverSrc} alt="Cover art full size" />
+                <button
+                  type="button"
+                  className="cover-lightbox-close"
+                  onClick={() => setCoverExpanded(false)}
+                  aria-label="Close expanded cover"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          )}
+          <div className="row low-confidence-actions">
             <button type="button" className="btn btn-secondary" onClick={onMusicbrainzLookup}>
               MusicBrainz
             </button>
@@ -451,7 +495,7 @@ function ReviewDeckInner({
 
         <div className="compare-grid">
           {albumSuggestions.length > 0 && (
-            <div className="guess-chip-row" style={{ marginBottom: "0.35rem" }}>
+            <div className="guess-chip-row chip-row-gap">
               {albumSuggestions.map((album) => (
                 <button
                   key={`album-${album}`}
@@ -465,7 +509,7 @@ function ReviewDeckInner({
             </div>
           )}
           {yearSuggestions.length > 0 && (
-            <div className="guess-chip-row" style={{ marginBottom: "0.35rem" }}>
+            <div className="guess-chip-row chip-row-gap">
               {yearSuggestions.map((year) => (
                 <button
                   key={`year-${year}`}

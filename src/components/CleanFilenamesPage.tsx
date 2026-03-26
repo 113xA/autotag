@@ -43,9 +43,9 @@ export function CleanFilenamesPage({ cleaning, onBack }: Props) {
     setFolder(dir);
     setBusy(true);
     try {
-      const scanned = await scanFolder(dir, cleaning);
-      setTracks(scanned);
-      setSelected(new Set(scanned.map((t) => t.path)));
+      const result = await scanFolder(dir, cleaning);
+      setTracks(result.tracks);
+      setSelected(new Set(result.tracks.map((t) => t.path)));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -121,8 +121,8 @@ export function CleanFilenamesPage({ cleaning, onBack }: Props) {
         <table className="file-table">
           <thead>
             <tr>
-              <th />
-              <th>Current file</th>
+              <th scope="col"><span className="sr-only">Select</span></th>
+              <th scope="col">Current file</th>
               <th>Path</th>
               <th>Cleaned target</th>
             </tr>
@@ -135,6 +135,7 @@ export function CleanFilenamesPage({ cleaning, onBack }: Props) {
                     type="checkbox"
                     checked={selected.has(t.path)}
                     onChange={() => toggle(t.path)}
+                    aria-label={`Select ${t.fileName}`}
                   />
                 </td>
                 <td className="mono">{t.fileName}</td>

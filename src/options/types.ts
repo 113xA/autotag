@@ -28,6 +28,7 @@ export type MatchingOptions = {
   useAmazon: boolean;
   useYoutube: boolean;
   verboseLogs: boolean;
+  concurrency: number;
 };
 
 export type ApplyMetadataOptions = {
@@ -59,6 +60,8 @@ export type AppSettings = {
   applyMeta: ApplyMetadataOptions;
   autoLookupOnImport: boolean;
   autoApplyOnComplete: boolean;
+  autoAcceptHighConfidence: boolean;
+  autoAcceptConfidenceThreshold: number;
   rename: RenameSettings;
   spotifyClientId: string | null;
   spotifyClientSecret: string | null;

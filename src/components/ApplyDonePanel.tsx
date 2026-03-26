@@ -24,9 +24,7 @@ export function ApplyDonePanel({ applyOutcomes, onResetImport, setView }: Props)
             >
               <span className="path">{shownPath}</span>
               {renamed && (
-                <span className="muted" style={{ marginLeft: "0.5rem" }}>
-                  was: {o.path}
-                </span>
+                <span className="muted"> was: {o.path}</span>
               )}
               {o.ok ? (
                 <span>OK</span>
@@ -37,17 +35,18 @@ export function ApplyDonePanel({ applyOutcomes, onResetImport, setView }: Props)
           );
         })}
       </ul>
-      <button type="button" className="btn primary" onClick={onResetImport}>
-        New session
-      </button>
-      <button
-        type="button"
-        className="btn"
-        onClick={() => setView("home")}
-        style={{ marginLeft: "0.5rem" }}
-      >
-        Back to home
-      </button>
+      <div className="apply-done-actions">
+        <button type="button" className="btn primary" onClick={onResetImport}>
+          New session
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setView("home")}
+        >
+          Back to home
+        </button>
+      </div>
     </section>
   );
 }

@@ -109,8 +109,8 @@ export function RekordboxXmlPage({ cleaning, onBack }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const out = await scanFolder(dir, cleaning);
-      setScanned(out);
+      const result = await scanFolder(dir, cleaning);
+      setScanned(result.tracks);
     } catch (e) {
       setError(String(e));
     } finally {

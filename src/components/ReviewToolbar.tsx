@@ -15,7 +15,9 @@ type BackgroundCoverLookupState = {
 
 type Props = {
   totalFiles: number;
+  acceptedCount: number;
   pendingCount: number;
+  autoAcceptedCount: number;
   lookupProgress: ProgressState;
   backgroundCoverLookup: BackgroundCoverLookupState;
   coverProgressTotal: number;
@@ -34,7 +36,9 @@ type Props = {
 
 export function ReviewToolbar({
   totalFiles,
+  acceptedCount,
   pendingCount,
+  autoAcceptedCount,
   lookupProgress,
   backgroundCoverLookup,
   coverProgressTotal,
@@ -55,6 +59,11 @@ export function ReviewToolbar({
       <div className="toolbar-inner">
         <span className="stat stat-pill">
           <strong>{totalFiles}</strong> files
+          <span className="stat-divider" aria-hidden="true" />
+          <strong>{acceptedCount}</strong> accepted
+          {autoAcceptedCount > 0 && (
+            <span className="stat-auto-hint">({autoAcceptedCount} auto)</span>
+          )}
           <span className="stat-divider" aria-hidden="true" />
           <strong>{pendingCount}</strong> left
         </span>
@@ -124,11 +133,11 @@ export function ReviewToolbar({
           </button>
           <input
             type="text"
-            className="field-proposed"
+            className="field-proposed toolbar-keyword"
             value={keywordSearch}
             onChange={(e) => setKeywordSearch(e.target.value)}
             placeholder="keywords (artist/title)"
-            style={{ maxWidth: "16rem" }}
+            aria-label="Keyword search for current track"
             onKeyDown={(e) => {
               if (e.key === "Enter" && !keywordSearchDisabled) {
                 e.preventDefault();
@@ -156,7 +165,7 @@ export function ReviewToolbar({
         </div>
       </div>
       {lookupProgress.active && lookupCurrentPath && (
-        <div className="muted" style={{ marginTop: "0.45rem", fontSize: "0.78rem" }}>
+        <div className="muted lookup-current-path">
           Current lookup: {lookupCurrentPath}
         </div>
       )}

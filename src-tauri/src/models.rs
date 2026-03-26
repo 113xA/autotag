@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::options::{ApplyMetadataOptions, RenameOptions};
 
+pub const AUDIO_EXT: &[&str] = &[
+    "mp3", "flac", "m4a", "mp4", "ogg", "opus",
+    "wav", "aiff", "aif", "ape", "wv", "mpc", "aac",
+];
+
 /// Fields to write from Rekordbox into audio tags (checkboxes from settings).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +102,21 @@ pub struct ScannedTrack {
     pub filename_stem: String,
     pub cleaned: CleanedFilename,
     pub current: TagSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedFile {
+    pub path: String,
+    pub file_name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanFolderResult {
+    pub tracks: Vec<ScannedTrack>,
+    pub skipped: Vec<SkippedFile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

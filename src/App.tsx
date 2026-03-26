@@ -34,6 +34,7 @@ import type {
   ProposedTags,
   ReviewTrack,
   ScannedTrack,
+  SkippedFile,
 } from "./types";
 import { parseU32 } from "./utils/parse";
 import {
@@ -59,6 +60,27 @@ type BackgroundCoverLookupState = {
   /** Lookup in progress for the track currently shown in review (spinner only). */
   workingOnCurrentFile: boolean;
 };
+function computeConfidenceScore(
+  confidence: "high" | "medium" | "low",
+  candidates: ReviewTrack["candidates"],
+): number {
+  if (candidates.length === 0) return 0;
+  const top = candidates[0];
+  const baseFromLevel =
+    confidence === "high" ? 75 : confidence === "medium" ? 40 : 10;
+  const topScore = top.score != null ? Math.min(top.score, 100) : 0;
+  const hasCover = Boolean(
+    top.coverUrl?.trim() || (top.coverOptions?.length ?? 0) > 0,
+  );
+  const coverBonus = hasCover ? 8 : 0;
+  const hasAlbum = Boolean(top.album?.trim());
+  const albumBonus = hasAlbum ? 4 : 0;
+  const hasYear = top.year != null;
+  const yearBonus = hasYear ? 3 : 0;
+  const raw = baseFromLevel + topScore * 0.1 + coverBonus + albumBonus + yearBonus;
+  return Math.min(100, Math.max(0, Math.round(raw)));
+}
+
 function toReviewTracks(
   scanned: ScannedTrack[],
   lookupByPath: Map<
@@ -70,14 +92,20 @@ function toReviewTracks(
     }
   >,
 ): ReviewTrack[] {
-  return scanned.map((t) => ({
-    ...t,
-    candidates: lookupByPath.get(t.path)?.candidates ?? [],
-    candidateIndex: 0,
-    reviewStatus: "pending" as const,
-    confidence: lookupByPath.get(t.path)?.confidence ?? "low",
-    artistGuesses: lookupByPath.get(t.path)?.artistGuesses ?? [],
-  }));
+  return scanned.map((t) => {
+    const lookup = lookupByPath.get(t.path);
+    const candidates = lookup?.candidates ?? [];
+    const confidence = lookup?.confidence ?? "low";
+    return {
+      ...t,
+      candidates,
+      candidateIndex: 0,
+      reviewStatus: "pending" as const,
+      confidence,
+      confidenceScore: computeConfidenceScore(confidence, candidates),
+      artistGuesses: lookup?.artistGuesses ?? [],
+    };
+  });
 }
 
 /** True if the current candidate already has usable cover art (no extra lookup needed). */
@@ -166,6 +194,8 @@ export default function App() {
     total: 0,
   });
   const [lookupCurrentPath, setLookupCurrentPath] = useState<string | null>(null);
+  const [skippedFiles, setSkippedFiles] = useState<SkippedFile[]>([]);
+  const [autoAcceptedCount, setAutoAcceptedCount] = useState(0);
   const [keywordSearch, setKeywordSearch] = useState("");
   const [singleLookupPath, setSingleLookupPath] = useState<string | null>(null);
   const [backgroundCoverLookup, setBackgroundCoverLookup] =
@@ -228,11 +258,13 @@ export default function App() {
         const nextCandidates = next.candidates;
         const clampedIdx =
           t.candidateIndex >= nextCandidates.length ? 0 : t.candidateIndex;
+        const newConfidence = next.confidence ?? t.confidence;
         return {
           ...t,
           candidates: nextCandidates,
           candidateIndex: clampedIdx,
-          confidence: next.confidence ?? t.confidence,
+          confidence: newConfidence,
+          confidenceScore: computeConfidenceScore(newConfidence, nextCandidates),
           artistGuesses: next.artistGuesses ?? t.artistGuesses,
         };
       }),
@@ -294,8 +326,51 @@ export default function App() {
     setWorking(proposedFromTrack(current));
   }, [current]);
 
+  useEffect(() => {
+    if (!settings.autoAcceptHighConfidence || phase !== "review") return;
+    const threshold = Math.min(
+      100,
+      Math.max(0, settings.autoAcceptConfidenceThreshold),
+    );
+    const eligible = tracks.filter(
+      (t) =>
+        t.reviewStatus === "pending" &&
+        t.confidenceScore >= threshold &&
+        t.candidates.length > 0,
+    );
+    if (eligible.length === 0) return;
+    const newPayloads: ApplyPayload[] = [];
+    const acceptedPaths = new Set<string>();
+    for (const t of eligible) {
+      const p = proposedFromTrack(t);
+      if (!p.artist.trim() || !p.title.trim()) continue;
+      newPayloads.push(buildApplyPart(t.path, p));
+      acceptedPaths.add(t.path);
+      reviewNavStackRef.current.push({ kind: "accept", path: t.path });
+    }
+    if (acceptedPaths.size === 0) return;
+    setReviewNavRev((v) => v + 1);
+    setAcceptedPayloads((a) => [...a, ...newPayloads]);
+    setAutoAcceptedCount((c) => c + acceptedPaths.size);
+    setTracks((ts) =>
+      ts.map((t) =>
+        acceptedPaths.has(t.path) ? { ...t, reviewStatus: "accepted" } : t,
+      ),
+    );
+  }, [
+    tracks,
+    settings.autoAcceptHighConfidence,
+    settings.autoAcceptConfidenceThreshold,
+    phase,
+  ]);
+
   const pendingCount = useMemo(
     () => tracks.filter((t) => t.reviewStatus === "pending").length,
+    [tracks],
+  );
+
+  const acceptedCount = useMemo(
+    () => tracks.filter((t) => t.reviewStatus === "accepted").length,
     [tracks],
   );
 
@@ -377,9 +452,13 @@ export default function App() {
     clearProgress();
     setLongTask(true);
     try {
-      const scanned = await scanFolder(dir, settings.cleaning);
+      const result = await scanFolder(dir, settings.cleaning);
+      const scanned = result.tracks;
+      if (result.skipped.length > 0) {
+        setSkippedFiles(result.skipped);
+      }
       if (scanned.length === 0) {
-        setError("No supported audio files found (mp3, flac, m4a, ogg, opus).");
+        setError("No supported audio files found in this folder.");
         setLongTask(false);
         return;
       }
@@ -405,6 +484,7 @@ export default function App() {
       });
       setTracks(review);
       setAcceptedPayloads([]);
+      setAutoAcceptedCount(0);
       setApplyOutcomes(null);
       setPhase("review");
       setLongTask(false);
@@ -914,6 +994,8 @@ export default function App() {
     setAcceptedPayloads([]);
     setApplyOutcomes(null);
     setError(null);
+    setSkippedFiles([]);
+    setAutoAcceptedCount(0);
     void clearSessionSnapshot();
     setSavedSession(null);
   };
@@ -952,6 +1034,29 @@ export default function App() {
   ]);
 
   // Move focus into the review region without scrolling; scroll position is
+  useEffect(() => {
+    if (view !== "autotag" || phase !== "review" || !current || allDone) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const ae = document.activeElement;
+      if (
+        ae instanceof HTMLInputElement ||
+        ae instanceof HTMLTextAreaElement ||
+        ae instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        handleAccept();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        handleSkip();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [view, phase, current, allDone, handleAccept, handleSkip]);
+
   // restored explicitly in handleAccept / handleSkip (Tauri WebView scrolls
   // to the first tabbable after the Accept button unmounts).
   useLayoutEffect(() => {
@@ -999,7 +1104,7 @@ export default function App() {
                 </p>
               </div>
             </div>
-            <div className="row" style={{ gap: "0.5rem" }}>
+            <div className="row">
               {view !== "home" && (
                 <button
                   type="button"
@@ -1044,6 +1149,36 @@ export default function App() {
           settings={settings}
           onChange={updateSettings}
         />
+
+        {skippedFiles.length > 0 && (
+          <div className="modal-backdrop" onClick={() => setSkippedFiles([])}>
+            <div
+              className="modal-dialog skipped-files-dialog"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3>Unsupported files skipped</h3>
+              <p className="muted">
+                {skippedFiles.length} file{skippedFiles.length !== 1 ? "s were" : " was"} found
+                but cannot be tagged. These formats don&apos;t support embedded metadata writing.
+              </p>
+              <div className="skipped-files-list">
+                {skippedFiles.map((f) => (
+                  <div key={f.path} className="skipped-file-item">
+                    <span className="mono">{f.fileName}</span>
+                    <span className="muted">{f.reason}</span>
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => setSkippedFiles([])}
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="app-main-surface" key={mainSurfaceKey}>
         {view === "home" && (
@@ -1124,6 +1259,9 @@ export default function App() {
               Configure cleaning, matching, and metadata in{" "}
               <strong>Settings</strong>, then choose a folder.
             </p>
+            <div className="banner-slot-inline" aria-live="polite">
+              {error && <div className="banner error">{error}</div>}
+            </div>
             <div className="row" style={{ marginBottom: "0.75rem" }}>
               <button
                 type="button"
@@ -1150,7 +1288,9 @@ export default function App() {
           <div className="autotag-review-workspace">
             <ReviewToolbar
               totalFiles={tracks.length}
+              acceptedCount={acceptedCount}
               pendingCount={pendingCount}
+              autoAcceptedCount={autoAcceptedCount}
               lookupProgress={lookupProgress}
               backgroundCoverLookup={backgroundCoverLookup}
               coverProgressTotal={coverProgressTotal}

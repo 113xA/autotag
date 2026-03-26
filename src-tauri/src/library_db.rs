@@ -16,7 +16,7 @@ use crate::filename_clean::clean_filename_stem;
 use crate::metadata::read_tag_snapshot;
 use crate::options::CleaningOptions;
 
-const AUDIO_EXT: &[&str] = &["mp3", "flac", "m4a", "mp4", "ogg", "opus"];
+use crate::models::AUDIO_EXT;
 
 pub fn library_db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
