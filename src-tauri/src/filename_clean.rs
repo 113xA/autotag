@@ -60,6 +60,12 @@ fn noise_tail_re(o: &CleaningOptions) -> Option<Regex> {
         parts.push("Club Mix");
         parts.push("Dub Mix");
         parts.push("Instrumental");
+        parts.push("Extended Edit");
+        parts.push("Original Version");
+        parts.push("Remix");
+        parts.push("Edit");
+        parts.push("Version");
+        parts.push("Mix");
     }
     if parts.is_empty() {
         return None;

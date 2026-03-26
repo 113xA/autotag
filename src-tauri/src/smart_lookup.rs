@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use reqwest::Client;
+use regex::Regex;
+use std::sync::OnceLock;
 
 use crate::amazon::{search_cover_urls as amazon_search_cover_urls, AmazonState};
 use crate::deezer::{search_tracks as deezer_search_tracks, DeezerState};
@@ -57,6 +60,30 @@ fn normalize_artist_display(s: &str) -> String {
     }
 }
 
+fn trailing_mix_keyword_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:\s*(?:[-–—]\s*)?[\(\[]?\s*(?:extended mix|extended version|extended edit|extended|original mix|original version|club mix|dub mix|radio edit|radio mix|instrumental|bootleg|mashup|vip|remix|edit|version|mix)\s*[\)\]]?)\s*$",
+        )
+        .unwrap()
+    })
+}
+
+fn strip_title_mix_keywords(title: &str) -> String {
+    let re = trailing_mix_keyword_re();
+    let mut out = title.trim().to_string();
+    for _ in 0..8 {
+        let next = re.replace_all(out.trim_end(), "").to_string();
+        let next = next.trim_end().to_string();
+        if next == out {
+            break;
+        }
+        out = next;
+    }
+    out.trim().to_string()
+}
+
 fn infer_artist_title(artist_in: &str, title_in: &str, stem_in: &str) -> (String, String) {
     let artist = artist_in.trim();
     let title = title_in.trim();
@@ -71,7 +98,10 @@ fn infer_artist_title(artist_in: &str, title_in: &str, stem_in: &str) -> (String
             || tt.contains("download")
     };
     if !artist.is_empty() && !title.is_empty() && !suspicious_artist && !suspicious_title {
-        return (normalize_artist_display(artist), title.to_string());
+        return (
+            normalize_artist_display(artist),
+            strip_title_mix_keywords(title),
+        );
     }
     let source = if !stem_in.trim().is_empty() {
         stem_in.trim()
@@ -83,16 +113,16 @@ fn infer_artist_title(artist_in: &str, title_in: &str, stem_in: &str) -> (String
             let aa = a.trim();
             let tt = t.trim();
             if !aa.is_empty() && !tt.is_empty() {
-                return (normalize_artist_display(aa), tt.to_string());
+                return (normalize_artist_display(aa), strip_title_mix_keywords(tt));
             }
         }
     }
     (
         normalize_artist_display(artist),
         if title.is_empty() {
-            source.to_string()
+            strip_title_mix_keywords(source)
         } else {
-            title.to_string()
+            strip_title_mix_keywords(title)
         },
     )
 }
@@ -155,6 +185,7 @@ fn source_weight(source: &str) -> f64 {
         "musicbrainz" => 0.60,
         "spotify" => 0.92,
         "deezer" => 0.86,
+        "itunes" => 0.80,
         "amazon" => 0.70,
         _ => 0.60,
     }
@@ -164,6 +195,41 @@ fn normalize_url_key(url: &str) -> String {
     let lower = url.to_lowercase();
     let base = lower.split('?').next().unwrap_or(&lower).to_string();
     base.replace("%2b", "+")
+}
+
+fn push_raw_cover(pool: &mut Vec<RawCover>, seen: &mut HashSet<String>, raw: RawCover) {
+    let key = format!("{}|{}", raw.source, normalize_url_key(&raw.url));
+    if seen.contains(&key) {
+        return;
+    }
+    seen.insert(key);
+    pool.push(raw);
+}
+
+fn build_query_variants(artist: &str, title: &str, stem: &str, residual: &str) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    let mut seen = HashSet::<String>::new();
+    let candidates = [
+        format!("{artist} {title}"),
+        format!("{artist} - {title}"),
+        format!("{artist} {residual}"),
+        format!("{artist} {stem}"),
+        title.to_string(),
+        residual.to_string(),
+    ];
+    for q in candidates {
+        let qq = q.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string();
+        if qq.is_empty() {
+            continue;
+        }
+        let key = qq.to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.insert(key);
+        out.push(qq);
+    }
+    out
 }
 
 fn rank_cover_for_candidate(c: &LookupCandidate, raw: &RawCover) -> f64 {
@@ -176,7 +242,12 @@ fn rank_cover_for_candidate(c: &LookupCandidate, raw: &RawCover) -> f64 {
     source * 0.45 + quality * 0.25 + sim * 0.30
 }
 
-fn add_cover_from_candidate(pool: &mut Vec<RawCover>, c: &LookupCandidate, source: &'static str) {
+#[allow(dead_code)]
+fn add_cover_from_candidate(
+    pool: &mut Vec<RawCover>,
+    c: &LookupCandidate,
+    source: &'static str,
+) {
     if let Some(url) = c.cover_url.as_ref() {
         pool.push(RawCover {
             url: url.clone(),
@@ -368,7 +439,7 @@ fn candidate_from_deezer(
         recording_mbid: String::new(),
         release_mbid: String::new(),
         artist: normalize_artist_display(&artist),
-        title,
+        title: strip_title_mix_keywords(&title),
         album: album.unwrap_or_default(),
         album_artist: None,
         track_number: None,
@@ -402,7 +473,7 @@ fn candidate_from_spotify(
         recording_mbid: String::new(),
         release_mbid: String::new(),
         artist: normalize_artist_display(&artist),
-        title,
+        title: strip_title_mix_keywords(&title),
         album: album.unwrap_or_default(),
         album_artist: None,
         track_number: None,
@@ -422,8 +493,17 @@ pub async fn smart_lookup_one(
     item: &LookupInput,
     matching: &MatchingOptions,
 ) -> Result<LookupResult, String> {
+    let started = Instant::now();
+    let cover_deadline = Instant::now() + Duration::from_secs(6);
     let stem = item.filename_stem.trim();
     let (seed_artist, seed_title) = infer_artist_title(&item.artist, &item.title, stem);
+    eprintln!(
+        "[smart_lookup_one] start path='{}' stem='{}' seed_artist='{}' seed_title='{}'",
+        item.path,
+        stem,
+        seed_artist,
+        seed_title
+    );
     let seed_artist_for_queries = if seed_artist.is_empty() {
         item.artist.as_str()
     } else {
@@ -447,86 +527,170 @@ pub async fn smart_lookup_one(
         matching,
     )
     .await;
+    eprintln!(
+        "[smart_lookup_one] identified artists for path='{}': {:?}",
+        item.path,
+        artists
+    );
     let mut merged: Vec<LookupCandidate> = Vec::new();
     let mut cover_pool: Vec<RawCover> = Vec::new();
+    let mut seen_cover_urls = HashSet::<String>::new();
 
     let mut searched_any = false;
     for a in artists.iter().take(3) {
         let residual = title_residual(stem, a);
         let query_title = if residual.trim().is_empty() {
-            item.title.trim()
+            seed_title_for_queries.trim()
         } else {
             residual.trim()
         };
-        if matching.use_deezer {
-            let q = format!("{a} {query_title}");
-            let dz = deezer_search_tracks(deezer, client, &q, matching.limit as usize).await;
-            if !dz.is_empty() {
-                searched_any = true;
+        let queries = build_query_variants(a, seed_title_for_queries, stem, query_title);
+        for q in queries {
+            if Instant::now() >= cover_deadline && cover_pool.len() >= 1 {
+                break;
             }
-            for h in dz {
-                if let Some(url) = h.cover_url.clone() {
-                    cover_pool.push(RawCover {
-                        url,
-                        source: "deezer",
-                        width: Some(1200),
-                        height: Some(1200),
-                        artist: Some(h.artist.clone()),
-                        title: Some(h.title.clone()),
-                    });
+            if matching.use_deezer {
+                let pool_before = cover_pool.len();
+                let dz = deezer_search_tracks(
+                    deezer,
+                    client,
+                    &q,
+                    (matching.limit as usize).max(12).min(15),
+                )
+                .await;
+                let dz_len = dz.len();
+                if !dz.is_empty() {
+                    searched_any = true;
                 }
-                merged.push(candidate_from_deezer(h.artist, h.title, h.album, h.cover_url, h.year));
+                for h in dz {
+                    if let Some(url) = h.cover_url.clone() {
+                        push_raw_cover(
+                            &mut cover_pool,
+                            &mut seen_cover_urls,
+                            RawCover {
+                                url,
+                                source: "deezer",
+                                width: Some(1200),
+                                height: Some(1200),
+                                artist: Some(h.artist.clone()),
+                                title: Some(h.title.clone()),
+                            },
+                        );
+                    }
+                    merged.push(candidate_from_deezer(h.artist, h.title, h.album, h.cover_url, h.year));
+                }
+                if dz_len > 0 {
+                    eprintln!(
+                        "[smart_lookup_one] path='{}' deezer q='{}' hits={} pool {}->{}",
+                        item.path,
+                        q,
+                        dz_len,
+                        pool_before,
+                        cover_pool.len()
+                    );
+                }
+            }
+            if matching.use_spotify {
+                let pool_before = cover_pool.len();
+                let sp = spotify_search_tracks(spotify, client, &q, matching.limit as usize).await;
+                let sp_len = sp.len();
+                if !sp.is_empty() {
+                    searched_any = true;
+                }
+                for h in sp {
+                    if let Some(url) = h.cover_url.clone() {
+                        push_raw_cover(
+                            &mut cover_pool,
+                            &mut seen_cover_urls,
+                            RawCover {
+                                url,
+                                source: "spotify",
+                                width: Some(640),
+                                height: Some(640),
+                                artist: Some(h.artist.clone()),
+                                title: Some(h.title.clone()),
+                            },
+                        );
+                    }
+                    merged.push(candidate_from_spotify(h.artist, h.title, h.album, h.cover_url, h.year));
+                }
+                if sp_len > 0 {
+                    eprintln!(
+                        "[smart_lookup_one] path='{}' spotify q='{}' hits={} pool {}->{}",
+                        item.path,
+                        q,
+                        sp_len,
+                        pool_before,
+                        cover_pool.len()
+                    );
+                }
+            }
+            if matching.use_amazon {
+                let pool_before = cover_pool.len();
+                let hits = amazon_search_cover_urls(amazon, client, a, query_title, 8).await;
+                if !hits.is_empty() {
+                    searched_any = true;
+                }
+                let hits_len = hits.len();
+                for hit in hits {
+                    push_raw_cover(
+                        &mut cover_pool,
+                        &mut seen_cover_urls,
+                        RawCover {
+                            url: hit.url,
+                            source: "itunes",
+                            width: None,
+                            height: None,
+                            artist: Some(a.clone()),
+                            title: Some(query_title.to_string()),
+                        },
+                    );
+                }
+                if hits_len > 0 {
+                    eprintln!(
+                        "[smart_lookup_one] path='{}' itunes a='{}' title='{}' hits={} pool {}->{}",
+                        item.path,
+                        a,
+                        query_title,
+                        hits_len,
+                        pool_before,
+                        cover_pool.len()
+                    );
+                }
+            }
+            if cover_pool.len() >= 4 {
+                break;
             }
         }
-        if matching.use_spotify {
-            let q = format!("{a} {query_title}");
-            let sp = spotify_search_tracks(spotify, client, &q, matching.limit as usize).await;
-            if !sp.is_empty() {
-                searched_any = true;
-            }
-            for h in sp {
-                if let Some(url) = h.cover_url.clone() {
-                    cover_pool.push(RawCover {
-                        url,
-                        source: "spotify",
-                        width: Some(640),
-                        height: Some(640),
-                        artist: Some(h.artist.clone()),
-                        title: Some(h.title.clone()),
-                    });
-                }
-                merged.push(candidate_from_spotify(h.artist, h.title, h.album, h.cover_url, h.year));
-            }
-        }
-        if matching.use_amazon {
-            for hit in amazon_search_cover_urls(amazon, client, a, query_title, 6).await {
-                searched_any = true;
-                cover_pool.push(RawCover {
-                    url: hit.url,
-                    source: "amazon",
-                    width: None,
-                    height: None,
-                    artist: Some(a.clone()),
-                    title: Some(query_title.to_string()),
-                });
-            }
+        if cover_pool.len() >= 4 {
+            break;
         }
     }
 
     if !searched_any {
         if matching.use_deezer {
             let q = format!("{} {}", seed_artist_for_queries.trim(), seed_title_for_queries.trim());
-            let dz = deezer_search_tracks(deezer, client, &q, matching.limit as usize).await;
+            let dz = deezer_search_tracks(
+                deezer,
+                client,
+                &q,
+                (matching.limit as usize).max(12).min(15),
+            )
+            .await;
             for h in dz {
                 if let Some(url) = h.cover_url.clone() {
-                    cover_pool.push(RawCover {
-                        url,
-                        source: "deezer",
-                        width: Some(1200),
-                        height: Some(1200),
-                        artist: Some(h.artist.clone()),
-                        title: Some(h.title.clone()),
-                    });
+                    push_raw_cover(
+                        &mut cover_pool,
+                        &mut seen_cover_urls,
+                        RawCover {
+                            url,
+                            source: "deezer",
+                            width: Some(1200),
+                            height: Some(1200),
+                            artist: Some(h.artist.clone()),
+                            title: Some(h.title.clone()),
+                        },
+                    );
                 }
                 merged.push(candidate_from_deezer(h.artist, h.title, h.album, h.cover_url, h.year));
             }
@@ -536,14 +700,18 @@ pub async fn smart_lookup_one(
             let sp = spotify_search_tracks(spotify, client, &q, matching.limit as usize).await;
             for h in sp {
                 if let Some(url) = h.cover_url.clone() {
-                    cover_pool.push(RawCover {
-                        url,
-                        source: "spotify",
-                        width: Some(640),
-                        height: Some(640),
-                        artist: Some(h.artist.clone()),
-                        title: Some(h.title.clone()),
-                    });
+                    push_raw_cover(
+                        &mut cover_pool,
+                        &mut seen_cover_urls,
+                        RawCover {
+                            url,
+                            source: "spotify",
+                            width: Some(640),
+                            height: Some(640),
+                            artist: Some(h.artist.clone()),
+                            title: Some(h.title.clone()),
+                        },
+                    );
                 }
                 merged.push(candidate_from_spotify(h.artist, h.title, h.album, h.cover_url, h.year));
             }
@@ -557,14 +725,18 @@ pub async fn smart_lookup_one(
         )
         .await
         {
-            cover_pool.push(RawCover {
-                url: hit.url,
-                source: "amazon",
-                width: None,
-                height: None,
-                artist: Some(seed_artist_for_queries.to_string()),
-                title: Some(seed_title_for_queries.to_string()),
-            });
+            push_raw_cover(
+                &mut cover_pool,
+                &mut seen_cover_urls,
+                RawCover {
+                    url: hit.url,
+                    source: "itunes",
+                    width: None,
+                    height: None,
+                    artist: Some(seed_artist_for_queries.to_string()),
+                    title: Some(seed_title_for_queries.to_string()),
+                },
+            );
         }
     }
 
@@ -573,7 +745,7 @@ pub async fn smart_lookup_one(
             recording_mbid: String::new(),
             release_mbid: String::new(),
             artist: seed_artist,
-            title: seed_title,
+            title: strip_title_mix_keywords(&seed_title),
             album: String::new(),
             album_artist: None,
             track_number: None,
@@ -587,6 +759,17 @@ pub async fn smart_lookup_one(
     let mut candidates = dedupe_and_sort(merged, stem);
     attach_best_cover_options(&mut candidates, &cover_pool);
     let (confidence, _) = confidence_for(&candidates, stem);
+    eprintln!(
+        "[smart_lookup_one] end path='{}' candidates={} cover_pool={} first_cover_opts={} elapsedMs={}",
+        item.path,
+        candidates.len(),
+        cover_pool.len(),
+        candidates
+            .first()
+            .map(|c| c.cover_options.len())
+            .unwrap_or(0),
+        started.elapsed().as_millis()
+    );
     Ok(LookupResult {
         path: item.path.clone(),
         candidates,
@@ -604,6 +787,7 @@ pub async fn musicbrainz_only_lookup_one(
     let mut candidates = state.lookup(&item.artist, &item.title, matching).await?;
     for c in &mut candidates {
         c.artist = normalize_artist_display(&c.artist);
+        c.title = strip_title_mix_keywords(&c.title);
     }
     let candidates = dedupe_and_sort(candidates, stem);
     let (confidence, _) = confidence_for(&candidates, stem);

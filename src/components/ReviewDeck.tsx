@@ -10,6 +10,9 @@ const PLACEHOLDER_COVER = "/placeholder-cover.svg";
 type Props = {
   track: ReviewTrack;
   proposed: ProposedTags;
+  coverSearchActive: boolean;
+  coverSearchCount: number;
+  coverSearchTotal: number;
   onProposedChange: (p: ProposedTags) => void;
   onPrevCandidate: () => void;
   onNextCandidate: () => void;
@@ -68,6 +71,9 @@ function fmtCurrent(t: TagSnapshot, key: keyof TagSnapshot): string {
 export function ReviewDeck({
   track,
   proposed,
+  coverSearchActive,
+  coverSearchCount,
+  coverSearchTotal,
   onProposedChange,
   onPrevCandidate,
   onNextCandidate,
@@ -253,9 +259,9 @@ export function ReviewDeck({
               <span className="muted">Unchanged (enable rename in settings)</span>
             )}
           </div>
-          {coverOptions.length > 0 && (
-            <div className="cover-options-block">
-              <div className="cover-options-title">Cover proposals</div>
+          <div className="cover-options-block">
+            <div className="cover-options-title">Cover proposals</div>
+            {coverOptions.length > 0 ? (
               <div className="cover-options-grid">
                 {coverOptions.slice(0, 4).map((opt) => {
                   const selected = proposed.coverUrl === opt.url;
@@ -273,8 +279,24 @@ export function ReviewDeck({
                   );
                 })}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="muted" style={{ marginTop: "0.35rem" }}>
+                {coverSearchActive ? "Searching for covers..." : "No covers found yet"}
+              </div>
+            )}
+            {coverSearchActive && (
+              <div className="cover-search-status" role="status" aria-live="polite">
+                <span className="cover-search-spinner" aria-hidden="true" />
+                Searching covers... {Math.min(coverSearchCount, coverSearchTotal)} / {coverSearchTotal}
+              </div>
+            )}
+            <progress
+              className="lookup-progress-bar"
+              max={coverSearchTotal}
+              value={Math.min(coverSearchCount, coverSearchTotal)}
+              aria-label="Current track cover progress"
+            />
+          </div>
           <div className="row" style={{ marginTop: "0.45rem" }}>
             <button type="button" className="btn btn-secondary" onClick={onMusicbrainzLookup}>
               muzicbrainz
@@ -331,18 +353,18 @@ export function ReviewDeck({
             <span>Proposed</span>
           </div>
           <Field
-            label="Artist"
-            current={fmtCurrent(cur, "artist")}
-            proposed={proposed.artist}
-            onChange={(artist) => onProposedChange({ ...proposed, artist })}
-            name="artist"
-          />
-          <Field
             label="Title"
             current={fmtCurrent(cur, "title")}
             proposed={proposed.title}
             onChange={(title) => onProposedChange({ ...proposed, title })}
             name="title"
+          />
+          <Field
+            label="Artist"
+            current={fmtCurrent(cur, "artist")}
+            proposed={proposed.artist}
+            onChange={(artist) => onProposedChange({ ...proposed, artist })}
+            name="artist"
           />
           <Field
             label="Album"

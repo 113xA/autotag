@@ -1,11 +1,10 @@
 use std::time::Duration;
 
-use regex::Regex;
 use reqwest::Client;
-use std::sync::OnceLock;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LibraryAutotag/0.1";
+const UA: &str = "LibraryAutotag/0.1.0 (itunes-cover-search)";
 
 #[derive(Debug, Clone)]
 pub struct AmazonCoverHit {
@@ -33,7 +32,7 @@ pub async fn search_cover_urls(
 ) -> Vec<AmazonCoverHit> {
     let _guard = state.gate.lock().await;
     let out = search_cover_urls_inner(client, artist, title, limit).await;
-    tokio::time::sleep(Duration::from_millis(900)).await;
+    tokio::time::sleep(Duration::from_millis(220)).await;
     out
 }
 
@@ -43,18 +42,27 @@ async fn search_cover_urls_inner(
     title: &str,
     limit: usize,
 ) -> Vec<AmazonCoverHit> {
-    let q = format!("{} {} cd", artist.trim(), title.trim()).trim().to_string();
+    let q = format!("{} {}", artist.trim(), title.trim())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if q.is_empty() {
         return vec![];
     }
+
     let url = format!(
-        "https://www.amazon.com/s?k={}&i=popular",
+        "https://itunes.apple.com/search?media=music&entity=song&limit=25&term={}",
         urlencoding::encode(&q)
+    );
+    eprintln!(
+        "[itunes-covers] term='{}' requesting limit={} (query='{}')",
+        title.trim(),
+        limit,
+        q
     );
     let resp = match client
         .get(url)
         .header(reqwest::header::USER_AGENT, UA)
-        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
         .timeout(Duration::from_secs(12))
         .send()
         .await
@@ -65,28 +73,38 @@ async fn search_cover_urls_inner(
     if !resp.status().is_success() {
         return vec![];
     }
-    let Ok(html) = resp.text().await else {
+    let Ok(v) = resp.json::<Value>().await else {
         return vec![];
     };
-    let mut out = Vec::new();
-    for url in extract_amazon_image_urls(&html).into_iter().take(limit.max(1)) {
-        out.push(AmazonCoverHit { url });
+    let Some(rows) = v.get("results").and_then(|x| x.as_array()) else {
+        return vec![];
+    };
+    let mut out: Vec<AmazonCoverHit> = Vec::new();
+    for r in rows {
+        let url = r
+            .get("artworkUrl100")
+            .and_then(|x| x.as_str())
+            .map(upscale_itunes_artwork_url);
+        let Some(url) = url else {
+            continue;
+        };
+        if !out.iter().any(|u| u.url == url) {
+            out.push(AmazonCoverHit { url });
+            if out.len() >= limit.max(1) {
+                break;
+            }
+        }
     }
+    eprintln!(
+        "[itunes-covers] term='{}' results={} returning={}",
+        title.trim(),
+        rows.len(),
+        out.len()
+    );
     out
 }
 
-fn extract_amazon_image_urls(html: &str) -> Vec<String> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r#"https://m\.media-amazon\.com/images/I/[A-Za-z0-9%._+-]+\.(jpg|jpeg|png)"#)
-            .expect("amazon image regex")
-    });
-    let mut out = Vec::new();
-    for m in re.find_iter(html) {
-        let url = m.as_str().replace("%2B", "+");
-        if !out.iter().any(|u| u == &url) {
-            out.push(url);
-        }
-    }
-    out
+fn upscale_itunes_artwork_url(url: &str) -> String {
+    url.replace("100x100bb", "1200x1200bb")
+        .replace("100x100-75", "1200x1200-100")
 }

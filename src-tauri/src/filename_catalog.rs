@@ -10,17 +10,21 @@ use url::Url;
 const UA: &str = "LibraryAutotag/0.1.0 (filename hints)";
 
 /// Minimum overlap of stem tokens covered by artist+title for a "strong" local parse.
+#[allow(dead_code)]
 pub const LOCAL_STRONG_MIN: f64 = 0.42;
 /// Minimum overlap for accepting an iTunes hit over weak locals.
+#[allow(dead_code)]
 pub const HINT_ACCEPT_MIN: f64 = 0.36;
 
 #[derive(Debug, Clone)]
 pub struct CatalogHit {
     pub artist: String,
+    #[allow(dead_code)]
     pub title: String,
     /// iTunes `collectionName` when present (reserved for future bias).
     #[allow(dead_code)]
     pub album: Option<String>,
+    #[allow(dead_code)]
     pub artwork_url_hires: Option<String>,
     pub score: f64,
 }
@@ -193,6 +197,7 @@ pub async fn resolve_from_stem(
 }
 
 /// Choose artist/title strings for MusicBrainz lookup.
+#[allow(dead_code)]
 pub fn merge_for_mb(
     local_artist: &str,
     local_title: &str,
@@ -225,6 +230,7 @@ pub fn merge_for_mb(
 }
 
 /// If the top MB candidate has no cover, use catalog artwork.
+#[allow(dead_code)]
 pub fn backfill_top_cover(candidates: &mut [crate::models::LookupCandidate], art: Option<&String>) {
     let Some(url) = art else {
         return;

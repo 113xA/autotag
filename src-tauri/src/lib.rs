@@ -12,8 +12,10 @@ mod smart_lookup;
 mod spotify;
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use rusqlite::{params, Connection};
+use serde::Serialize;
 use serde_json::Value;
 use tauri::Emitter;
 use tauri::Manager;
@@ -146,7 +148,14 @@ async fn batch_lookup(
     amazon: tauri::State<'_, amazon::AmazonState>,
     items: Vec<LookupInput>,
     matching: MatchingOptions,
+    run_id: u64,
 ) -> Result<Vec<LookupResult>, String> {
+    #[derive(Serialize, Clone)]
+    struct LookupResultEvent<'a> {
+        run_id: u64,
+        result: &'a LookupResult,
+    }
+
     let total = items.len() as u32;
     emit_progress(
         &app,
@@ -157,9 +166,20 @@ async fn batch_lookup(
             message: None,
         },
     );
+    eprintln!(
+        "[batch_lookup] start total={} items kind=lookup",
+        total
+    );
     let client = state.client.clone();
     let mut results = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
+        let started = Instant::now();
+        eprintln!(
+            "[batch_lookup] ({}/{}) start path={}",
+            i + 1,
+            total,
+            item.path
+        );
         let one = smart_lookup::smart_lookup_one(
             &state,
             &client,
@@ -170,17 +190,42 @@ async fn batch_lookup(
             &matching,
         )
         .await?;
+
+        let _ = app.emit(
+            "lookup_result",
+            LookupResultEvent {
+                run_id,
+                result: &one,
+            },
+        );
+
         results.push(one);
+        eprintln!(
+            "[batch_lookup] ({}/{}) done path={} candidates={} coverOptionsFirst={:?} elapsedMs={}",
+            i + 1,
+            total,
+            item.path,
+            results
+                .last()
+                .map(|r| r.candidates.len())
+                .unwrap_or(0),
+            results
+                .last()
+                .and_then(|r| r.candidates.first())
+                .map(|c| c.cover_options.len()),
+            started.elapsed().as_millis()
+        );
         emit_progress(
             &app,
             ProgressPayload {
                 kind: "lookup".into(),
                 done: (i + 1) as u32,
                 total,
-                message: None,
+                message: Some(item.path.clone()),
             },
         );
     }
+    eprintln!("[batch_lookup] done total={}", total);
     Ok(results)
 }
 

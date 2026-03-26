@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyBatch,
@@ -19,12 +20,23 @@ import { ReviewDeck } from "./components/ReviewDeck";
 import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
 import type { AppSettings, RenameSettings } from "./options/types";
-import type { ApplyPayload, ProposedTags, ReviewTrack, ScannedTrack } from "./types";
+import type {
+  ApplyPayload,
+  ProposedTags,
+  ReviewTrack,
+  ScannedTrack,
+  LookupResult,
+} from "./types";
 import { parseU32 } from "./utils/parse";
 import "./App.css";
 
 type Phase = "import" | "review" | "apply_done";
 type PageView = "home" | "autotag" | "clean_names" | "rekordbox_xml";
+
+type LookupResultEventPayload = {
+  run_id: number;
+  result: LookupResult;
+};
 type LookupProgressState = {
   active: boolean;
   done: number;
@@ -121,6 +133,8 @@ export default function App() {
     done: 0,
     total: 0,
   });
+  const [lookupCurrentPath, setLookupCurrentPath] = useState<string | null>(null);
+  const [singleLookupPath, setSingleLookupPath] = useState<string | null>(null);
   const [savedSession, setSavedSession] = useState<SessionSnapshot | null>(null);
   const [resumeChecked, setResumeChecked] = useState(false);
   const lookupRunIdRef = useRef(0);
@@ -157,8 +171,43 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!lookupProgress.active) return;
+    let unlisten: UnlistenFn | undefined;
+    void (async () => {
+      unlisten = await listen<LookupResultEventPayload>(
+        "lookup_result",
+        (e) => {
+          const payload = e.payload;
+          if (payload.run_id !== lookupRunIdRef.current) return;
+          const firstCoverOpts =
+            payload.result.candidates[0]?.coverOptions?.length ?? 0;
+          console.debug("[lookup_result]", {
+            path: payload.result.path,
+            candidates: payload.result.candidates.length,
+            firstCoverOpts,
+          });
+          mergeLookupResults([payload.result]);
+        },
+      );
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [mergeLookupResults]);
+
+  useEffect(() => {
     if (!progress || progress.kind !== "lookup") return;
+    // Verbose debugging: see exactly which track lookup is currently running.
+    console.debug("[lookup-progress]", {
+      active: lookupProgress.active,
+      done: progress.done,
+      total: progress.total,
+      message: progress.message ?? null,
+    });
+
+    if (!lookupProgress.active) return;
+    if (progress.message) {
+      setLookupCurrentPath(progress.message);
+    }
     setLookupProgress((prev) => {
       if (!prev.active) return prev;
       const total = progress.total > 0 ? progress.total : prev.total;
@@ -205,6 +254,20 @@ export default function App() {
     () => tracks.filter((t) => t.reviewStatus === "pending").length,
     [tracks],
   );
+  const currentCoverCount = useMemo(() => {
+    if (!current) return 0;
+    const c = current.candidates[current.candidateIndex];
+    return c?.coverOptions?.length ?? 0;
+  }, [current]);
+
+  useEffect(() => {
+    if (!current) return;
+    console.debug("[covers-current]", {
+      path: current.path,
+      candidateIndex: current.candidateIndex,
+      coverCount: currentCoverCount,
+    });
+  }, [current?.path, current?.candidateIndex, currentCoverCount]);
   const allDone = tracks.length > 0 && pendingCount === 0;
   const hasActiveWork =
     tracks.length > 0 ||
@@ -259,19 +322,19 @@ export default function App() {
         title: t.cleaned.searchTitle,
         filenameStem: t.filenameStem,
       }));
-      const hasLookup = settings.autoLookupOnImport && items.length > 0;
-      const runId = hasLookup ? ++lookupRunIdRef.current : lookupRunIdRef.current;
+      const runId = items.length > 0 ? ++lookupRunIdRef.current : lookupRunIdRef.current;
       setTracks(review);
       setAcceptedPayloads([]);
       setApplyOutcomes(null);
       setPhase("review");
       setLongTask(false);
 
-      if (!hasLookup) return;
+      if (items.length === 0) return;
       setLookupProgress({ active: true, done: 0, total: items.length });
+      setLookupCurrentPath(null);
       void (async () => {
         try {
-          const all = await batchLookup(items, settings.matching);
+          const all = await batchLookup(items, settings.matching, runId);
           if (lookupRunIdRef.current !== runId) return;
           mergeLookupResults(all);
         } catch (e) {
@@ -280,6 +343,7 @@ export default function App() {
         } finally {
           if (lookupRunIdRef.current !== runId) return;
           setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+          setLookupCurrentPath(null);
         }
       })();
     } catch (e) {
@@ -309,8 +373,9 @@ export default function App() {
     if (items.length === 0) return;
     const runId = ++lookupRunIdRef.current;
     setLookupProgress({ active: true, done: 0, total: items.length });
+    setLookupCurrentPath(null);
     try {
-      const first = await batchLookup([items[0]], settings.matching);
+      const first = await batchLookup([items[0]], settings.matching, runId);
       if (lookupRunIdRef.current !== runId) return;
       mergeLookupResults(first);
     } catch (e) {
@@ -320,12 +385,13 @@ export default function App() {
     if (items.length === 1) {
       if (lookupRunIdRef.current === runId) {
         setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total || 1 }));
+        setLookupCurrentPath(null);
       }
       return;
     }
     void (async () => {
       try {
-        const rest = await batchLookup(items.slice(1), settings.matching);
+        const rest = await batchLookup(items.slice(1), settings.matching, runId);
         if (lookupRunIdRef.current !== runId) return;
         mergeLookupResults(rest);
       } catch (e) {
@@ -334,6 +400,7 @@ export default function App() {
       } finally {
         if (lookupRunIdRef.current !== runId) return;
         setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+        setLookupCurrentPath(null);
       }
     })();
   };
@@ -354,14 +421,18 @@ export default function App() {
 
   const rerunSingleLookup = useCallback(
     async (path: string, artist: string, title: string, filenameStem: string) => {
+      setSingleLookupPath(path);
       try {
         const one = await batchLookup(
           [{ path, artist, title, filenameStem }],
           settings.matching,
+          lookupRunIdRef.current,
         );
         mergeLookupResults(one);
       } catch (e) {
         setError(String(e));
+      } finally {
+        setSingleLookupPath((prev) => (prev === path ? null : prev));
       }
     },
     [mergeLookupResults, settings.matching],
@@ -369,6 +440,7 @@ export default function App() {
 
   const rerunSingleMusicbrainz = useCallback(
     async (path: string, artist: string, title: string, filenameStem: string) => {
+      setSingleLookupPath(path);
       try {
         const one = await musicbrainzLookupOne(
           { path, artist, title, filenameStem },
@@ -377,6 +449,8 @@ export default function App() {
         mergeLookupResults([one]);
       } catch (e) {
         setError(String(e));
+      } finally {
+        setSingleLookupPath((prev) => (prev === path ? null : prev));
       }
     },
     [mergeLookupResults, settings.matching],
@@ -490,6 +564,7 @@ export default function App() {
   const resetImport = () => {
     lookupRunIdRef.current += 1;
     setLookupProgress({ active: false, done: 0, total: 0 });
+    setLookupCurrentPath(null);
     clearProgress();
     setPhase("import");
     setTracks([]);
@@ -722,6 +797,16 @@ export default function App() {
 
         {view === "autotag" && phase === "review" && (
           <>
+            {(() => {
+              const coverProgressTotal = tracks.length * 4;
+              const coverProgressDone = tracks.reduce((acc, t) => {
+                const best = t.candidates.reduce(
+                  (mx, c) => Math.max(mx, c.coverOptions?.length ?? 0),
+                  0,
+                );
+                return acc + Math.min(best, 4);
+              }, 0);
+              return (
             <section className="toolbar">
               <div className="toolbar-inner">
                 <span className="stat stat-pill">
@@ -743,6 +828,20 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                {coverProgressTotal > 0 && (
+                  <div className="lookup-progress" aria-live="polite">
+                    <span className="lookup-progress-label">Covers loaded</span>
+                    <progress
+                      className="lookup-progress-bar"
+                      max={coverProgressTotal}
+                      value={Math.min(coverProgressDone, coverProgressTotal)}
+                    />
+                    <span className="lookup-progress-text">
+                      {Math.min(coverProgressDone, coverProgressTotal)} /{" "}
+                      {coverProgressTotal}
+                    </span>
+                  </div>
+                )}
                 <div className="toolbar-actions">
                   <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
                     Re-run lookup
@@ -756,7 +855,14 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              {lookupProgress.active && lookupCurrentPath && (
+                <div className="muted" style={{ marginTop: "0.45rem", fontSize: "0.78rem" }}>
+                  Current lookup: {lookupCurrentPath}
+                </div>
+              )}
             </section>
+              );
+            })()}
 
             {error && <div className="banner error">{error}</div>}
 
@@ -811,9 +917,19 @@ export default function App() {
             )}
 
             {current && working && !allDone && (
+              (() => {
+                const currentCandidate = current.candidates[current.candidateIndex];
+                const currentCoverCount = currentCandidate?.coverOptions?.length ?? 0;
+                const coverSearchActive =
+                  lookupProgress.active ||
+                  singleLookupPath === current.path;
+                return (
               <ReviewDeck
                 track={current}
                 proposed={working}
+                coverSearchActive={coverSearchActive}
+                coverSearchCount={currentCoverCount}
+                coverSearchTotal={4}
                 onProposedChange={setWorking}
                 onPrevCandidate={() => bumpCandidate(-1)}
                 onNextCandidate={() => bumpCandidate(1)}
@@ -824,6 +940,8 @@ export default function App() {
                 onMusicbrainzLookup={handleMusicbrainzLookup}
                 rename={settings.rename}
               />
+                );
+              })()
             )}
           </>
         )}

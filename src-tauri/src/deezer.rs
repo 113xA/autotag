@@ -35,7 +35,7 @@ pub async fn search_tracks(
 ) -> Vec<DeezerTrackHit> {
     let _guard = state.gate.lock().await;
     let out = search_tracks_inner(client, query, limit).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
     out
 }
 

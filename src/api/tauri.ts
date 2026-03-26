@@ -36,8 +36,9 @@ export type LookupBatchItem = {
 export async function batchLookup(
   items: LookupBatchItem[],
   matching: MatchingOptions,
+  run_id: number,
 ): Promise<LookupResult[]> {
-  return invoke<LookupResult[]>("batch_lookup", { items, matching });
+  return invoke<LookupResult[]>("batch_lookup", { items, matching, runId: run_id });
 }
 
 export async function applyBatch(
