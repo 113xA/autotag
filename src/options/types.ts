@@ -26,6 +26,8 @@ export type MatchingOptions = {
   useDeezer: boolean;
   useSpotify: boolean;
   useAmazon: boolean;
+  useYoutube: boolean;
+  verboseLogs: boolean;
 };
 
 export type ApplyMetadataOptions = {

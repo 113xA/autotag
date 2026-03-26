@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { ProgressPayload } from "../options/types";
 
 const LABELS: Record<ProgressPayload["kind"], string> = {
@@ -13,6 +14,28 @@ type Props = {
 };
 
 export function LoadingOverlay({ open, progress }: Props) {
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const prevActiveRef = useRef<Element | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    prevActiveRef.current = document.activeElement;
+    const node = overlayRef.current;
+    node?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      e.preventDefault();
+      node?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (prevActiveRef.current instanceof HTMLElement) {
+        prevActiveRef.current.focus();
+      }
+    };
+  }, [open]);
+
   if (!open) return null;
   const rawKind = progress?.kind ?? "scan";
   const kind: ProgressPayload["kind"] =
@@ -32,9 +55,17 @@ export function LoadingOverlay({ open, progress }: Props) {
   const indeterminate = !hasTotal;
 
   return (
-    <div className="loading-overlay" role="alertdialog" aria-busy="true">
+    <div
+      className="loading-overlay"
+      role="alertdialog"
+      aria-busy="true"
+      aria-modal="true"
+      aria-labelledby="loading-overlay-title"
+      tabIndex={-1}
+      ref={overlayRef}
+    >
       <div className="loading-card">
-        <h2 className="loading-title">{title}</h2>
+        <h2 id="loading-overlay-title" className="loading-title">{title}</h2>
         {sub && <p className="loading-sub">{sub}</p>}
         {indeterminate ? (
           <progress className="loading-bar loading-bar-indeterminate" />

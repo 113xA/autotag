@@ -1223,6 +1223,17 @@ body {
   color: var(--accent);
 }
 
+.opt-section-danger {
+  border: 1px solid rgba(248, 113, 141, 0.35);
+  border-radius: var(--radius-md);
+  padding: 0.8rem 0.9rem;
+  background: rgba(248, 113, 141, 0.08);
+}
+
+.opt-section-danger h3 {
+  color: #f8718d;
+}
+
 .opt-hint {
   font-size: 0.8rem;
   color: var(--text-secondary);

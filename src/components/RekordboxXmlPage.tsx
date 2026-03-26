@@ -32,6 +32,23 @@ const DEFAULT_OPTIONS: RekordboxWriteOptions = {
   writeArtistTitleAlbum: false,
 };
 
+const OPTION_LABELS: Record<keyof RekordboxWriteOptions, string> = {
+  writeBpm: "BPM",
+  writeKey: "Key",
+  writeRating: "Rating",
+  writePlayCounter: "Play count",
+  writeComment: "Comment",
+  appendPlayCountToComment: "Append play count to comment",
+  writeRemixer: "Remixer",
+  writeLabel: "Label",
+  writeGenre: "Genre",
+  writeGrouping: "Grouping",
+  writeTrackNumber: "Track number",
+  writeDiscNumber: "Disc number",
+  writeYear: "Year",
+  writeArtistTitleAlbum: "Artist / Title / Album",
+};
+
 export function RekordboxXmlPage({ cleaning, onBack }: Props) {
   const [xmlPath, setXmlPath] = useState<string | null>(null);
   const [folder, setFolder] = useState<string | null>(null);
@@ -183,7 +200,7 @@ export function RekordboxXmlPage({ cleaning, onBack }: Props) {
                     }))
                   }
                 />
-                {key}
+                {OPTION_LABELS[key as keyof RekordboxWriteOptions]}
               </label>
             ))}
           </div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { previewRename, spotifyAuth, spotifyAuthBrowser } from "../api/tauri";
 import { EDM_PRESETS, GENRE_SUGGESTIONS, applyPreset } from "../options/presets";
 import type { AppSettings, RenameSeparator, RenameSettings } from "../options/types";
@@ -16,9 +16,12 @@ type Props = {
 export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
   const [renameExample, setRenameExample] = useState<string | null>(null);
   const [spotifyStatus, setSpotifyStatus] = useState<string | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const previousFocusRef = useRef<Element | null>(null);
 
   useEffect(() => {
     if (!open) return;
+    previousFocusRef.current = document.activeElement;
     const r = settings.rename;
     if (!r.enabled) {
       setRenameExample(null);
@@ -44,6 +47,51 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
     };
   }, [open, settings.rename]);
 
+  useEffect(() => {
+    if (!open) {
+      if (previousFocusRef.current instanceof HTMLElement) {
+        previousFocusRef.current.focus();
+      } else {
+        const settingsBtn = document.querySelector(".settings-btn");
+        if (settingsBtn instanceof HTMLElement) settingsBtn.focus();
+      }
+      return;
+    }
+    drawerRef.current?.focus();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!open) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key === "Tab") {
+        const root = drawerRef.current;
+        if (!root) return;
+        const focusables = root.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusables.length === 0) {
+          e.preventDefault();
+          root.focus();
+          return;
+        }
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        if (!e.shiftKey && active === last) {
+          e.preventDefault();
+          first.focus();
+        } else if (e.shiftKey && active === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
   if (!open) return null;
 
   const s = settings;
@@ -66,7 +114,13 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
         aria-label="Close settings"
         onClick={onClose}
       />
-      <aside className="options-drawer" aria-label="Settings">
+      <aside
+        className="options-drawer"
+        aria-label="Settings"
+        aria-modal="true"
+        tabIndex={-1}
+        ref={drawerRef}
+      >
         <div className="options-drawer-head">
           <h2>Settings</h2>
           <button type="button" className="btn btn-ghost icon-close" onClick={onClose}>
@@ -399,6 +453,22 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               />
               Amazon cover hints (public product search)
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.useYoutube}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      useYoutube: e.target.checked,
+                    },
+                  })
+                }
+              />
+              YouTube fallback hints (videos/topic metadata)
+            </label>
             <label className="field block">
               <span>Spotify client ID (optional)</span>
               <input
@@ -415,6 +485,7 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
             <label className="field block">
               <span>Spotify client secret (optional)</span>
               <input
+                type="password"
                 value={s.spotifyClientSecret ?? ""}
                 onChange={(e) =>
                   onChange({
@@ -490,6 +561,29 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               </p>
             )}
             {spotifyStatus && <p className="opt-hint">{spotifyStatus}</p>}
+          </section>
+
+          <section className="opt-section opt-section-danger">
+            <h3>Dev options</h3>
+            <p className="opt-hint">
+              Debug-only options. Can produce a lot of terminal/browser logs.
+            </p>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.verboseLogs}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      verboseLogs: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Verbose console logs (frontend + Rust backend)
+            </label>
           </section>
 
           <section className="opt-section">
@@ -585,6 +679,15 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                 className="genre-custom-input"
                 value={s.applyMeta.genre ?? ""}
                 onChange={(e) =>
+                  onChange({
+                    ...s,
+                    applyMeta: {
+                      ...s.applyMeta,
+                      genre: e.target.value,
+                    },
+                  })
+                }
+                onBlur={(e) =>
                   onChange({
                     ...s,
                     applyMeta: {

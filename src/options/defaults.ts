@@ -25,6 +25,8 @@ export const defaultMatching = (): AppSettings["matching"] => ({
   useDeezer: true,
   useSpotify: false,
   useAmazon: true,
+  useYoutube: false,
+  verboseLogs: false,
 });
 
 export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({

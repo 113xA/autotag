@@ -61,6 +61,10 @@ pub struct MatchingOptions {
     pub use_spotify: bool,
     #[serde(default = "default_true")]
     pub use_amazon: bool,
+    #[serde(default)]
+    pub use_youtube: bool,
+    #[serde(default)]
+    pub verbose_logs: bool,
 }
 
 impl Default for MatchingOptions {
@@ -74,6 +78,8 @@ impl Default for MatchingOptions {
             use_deezer: true,
             use_spotify: false,
             use_amazon: true,
+            use_youtube: false,
+            verbose_logs: false,
         }
     }
 }

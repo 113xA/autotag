@@ -134,27 +134,35 @@ export async function musicbrainzLookupOne(
 }
 
 export function proposedFromTrack(track: ReviewTrack): ProposedTags {
+  const currentArtist = track.current.artist?.trim() || "";
+  const currentTitle = track.current.title?.trim() || "";
+  const currentAlbum = track.current.album?.trim() || "";
+  const currentAlbumArtist = track.current.albumArtist?.trim() || "";
+  const currentTrackNumber =
+    track.current.trackNumber != null ? String(track.current.trackNumber) : "";
+  const currentYear = track.current.year != null ? String(track.current.year) : "";
+
   const c = track.candidates[track.candidateIndex];
   if (c) {
     return {
-      artist: c.artist,
-      title: c.title,
-      album: c.album,
-      albumArtist: c.albumArtist ?? "",
+      artist: c.artist?.trim() || currentArtist || track.cleaned.searchArtist,
+      title: c.title?.trim() || currentTitle || track.cleaned.searchTitle,
+      album: c.album?.trim() || currentAlbum,
+      albumArtist: c.albumArtist?.trim() || currentAlbumArtist,
       trackNumber:
-        c.trackNumber != null ? String(c.trackNumber) : "",
-      year: c.year != null ? String(c.year) : "",
+        c.trackNumber != null ? String(c.trackNumber) : currentTrackNumber,
+      year: c.year != null ? String(c.year) : currentYear,
       coverUrl: c.coverUrl,
       releaseMbid: c.releaseMbid?.trim() || null,
     };
   }
   return {
-    artist: track.cleaned.searchArtist,
-    title: track.cleaned.searchTitle,
-    album: "",
-    albumArtist: "",
-    trackNumber: "",
-    year: "",
+    artist: currentArtist || track.cleaned.searchArtist,
+    title: currentTitle || track.cleaned.searchTitle,
+    album: currentAlbum,
+    albumArtist: currentAlbumArtist,
+    trackNumber: currentTrackNumber,
+    year: currentYear,
     coverUrl: null,
     releaseMbid: null,
   };

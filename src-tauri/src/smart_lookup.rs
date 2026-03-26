@@ -5,13 +5,17 @@ use reqwest::Client;
 use regex::Regex;
 use std::sync::OnceLock;
 
-use crate::amazon::{search_cover_urls as amazon_search_cover_urls, AmazonState};
+use crate::amazon::{
+    search_cover_urls as itunes_search_cover_urls, search_tracks as itunes_search_tracks,
+    AmazonState, ItunesTrackHit,
+};
 use crate::deezer::{search_tracks as deezer_search_tracks, DeezerState};
 use crate::filename_catalog::{resolve_from_stem, stem_overlap_score};
 use crate::models::{CoverOption, LookupCandidate, LookupInput, LookupResult};
 use crate::musicbrainz::MbState;
 use crate::options::MatchingOptions;
 use crate::spotify::{search_tracks as spotify_search_tracks, SpotifyState};
+use crate::youtube::{search_tracks as youtube_search_tracks, YoutubeState};
 
 #[derive(Debug, Clone)]
 struct ArtistGuess {
@@ -183,11 +187,26 @@ fn cover_quality_score(width: Option<u32>, height: Option<u32>) -> f64 {
 fn source_weight(source: &str) -> f64 {
     match source {
         "musicbrainz" => 0.60,
-        "spotify" => 0.92,
-        "deezer" => 0.86,
-        "itunes" => 0.80,
+        "deezer" => 0.92,
+        "itunes" => 0.88,
+        "youtube" => 0.70,
+        "spotify" => 0.66,
         "amazon" => 0.70,
         _ => 0.60,
+    }
+}
+
+fn candidate_source_weight(c: &LookupCandidate) -> f64 {
+    if c.cover_options.iter().any(|o| o.source == "deezer") {
+        1.0
+    } else if c.cover_options.iter().any(|o| o.source == "itunes") {
+        0.92
+    } else if c.cover_options.iter().any(|o| o.source == "youtube") {
+        0.80
+    } else if c.cover_options.iter().any(|o| o.source == "spotify") {
+        0.72
+    } else {
+        0.70
     }
 }
 
@@ -315,6 +334,59 @@ fn attach_best_cover_options(cands: &mut [LookupCandidate], pool: &[RawCover]) {
     }
 }
 
+fn title_noise_penalty(title: &str) -> f64 {
+    let t = title.to_lowercase();
+    if t.contains(".info") || t.contains("download") || t.contains("jsonline") {
+        0.25
+    } else if t.contains("extended") || t.contains("original mix") || t.contains("remix") {
+        0.08
+    } else {
+        0.0
+    }
+}
+
+fn candidate_relevance_score(stem: &str, c: &LookupCandidate) -> f64 {
+    let overlap = stem_overlap_score(stem, &c.artist, &c.title);
+    let source = candidate_source_weight(c);
+    let noise = title_noise_penalty(&c.title);
+    (overlap * 0.78 + source * 0.22 - noise).max(0.0)
+}
+
+fn apply_dynamic_relevance_filter(mut cands: Vec<LookupCandidate>, stem: &str) -> Vec<LookupCandidate> {
+    if cands.len() <= 1 {
+        return cands;
+    }
+    let mut scored = cands
+        .drain(..)
+        .map(|c| {
+            let s = candidate_relevance_score(stem, &c);
+            (c, s)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top = scored.first().map(|x| x.1).unwrap_or(0.0);
+    let second = scored.get(1).map(|x| x.1).unwrap_or(0.0);
+    let strict = top >= 0.74 && (top - second) >= 0.12;
+    let min = if strict {
+        (top - 0.10).max(0.64)
+    } else if top >= 0.55 {
+        (top - 0.22).max(0.42)
+    } else {
+        0.30
+    };
+    let keep = if strict { 4 } else { 8 };
+    let mut out = scored
+        .into_iter()
+        .filter(|(_, s)| *s >= min)
+        .take(keep)
+        .map(|(c, _)| c)
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        out = vec![];
+    }
+    out
+}
+
 fn dedupe_and_sort(mut cands: Vec<LookupCandidate>, stem: &str) -> Vec<LookupCandidate> {
     let mut seen = HashSet::new();
     cands.retain(|c| {
@@ -331,17 +403,19 @@ fn dedupe_and_sort(mut cands: Vec<LookupCandidate>, stem: &str) -> Vec<LookupCan
         }
     });
     cands.sort_by(|a, b| {
-        let sa = stem_overlap_score(stem, &a.artist, &a.title);
-        let sb = stem_overlap_score(stem, &b.artist, &b.title);
+        let sa = candidate_relevance_score(stem, a);
+        let sb = candidate_relevance_score(stem, b);
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
-    cands
+    apply_dynamic_relevance_filter(cands, stem)
 }
 
 async fn identify_artists(
     client: &Client,
     deezer: &DeezerState,
     spotify: &SpotifyState,
+    amazon: &AmazonState,
+    youtube: &YoutubeState,
     item: &LookupInput,
     matching: &MatchingOptions,
 ) -> Vec<String> {
@@ -399,6 +473,18 @@ async fn identify_artists(
                 });
         }
     }
+    if matching.use_amazon {
+        let hits = itunes_search_tracks(amazon, client, &item.artist, &item.title, 8, false).await;
+        for h in hits {
+            let s = stem_overlap_score(stem, &h.artist, &h.title);
+            map.entry(normalize_artist_key(&h.artist))
+                .and_modify(|g| g.score = g.score.max((s * 0.95).max(0.30)))
+                .or_insert(ArtistGuess {
+                    artist: normalize_artist_display(&h.artist),
+                    score: (s * 0.95).max(0.30),
+                });
+        }
+    }
     if matching.use_spotify {
         let hits = spotify_search_tracks(spotify, client, stem, 8).await;
         for h in hits {
@@ -408,6 +494,18 @@ async fn identify_artists(
                 .or_insert(ArtistGuess {
                     artist: normalize_artist_display(&h.artist),
                     score: s,
+                });
+        }
+    }
+    if matching.use_youtube {
+        let hits = youtube_search_tracks(youtube, client, &item.artist, &item.title, 6, false).await;
+        for h in hits {
+            let s = stem_overlap_score(stem, &h.artist, &h.title);
+            map.entry(normalize_artist_key(&h.artist))
+                .and_modify(|g| g.score = g.score.max((s * 0.75).max(0.22)))
+                .or_insert(ArtistGuess {
+                    artist: normalize_artist_display(&h.artist),
+                    score: (s * 0.75).max(0.22),
                 });
         }
     }
@@ -484,12 +582,70 @@ fn candidate_from_spotify(
     }
 }
 
+fn candidate_from_itunes(h: ItunesTrackHit) -> LookupCandidate {
+    let cover_options = h
+        .cover_url
+        .as_ref()
+        .map(|url| {
+            vec![CoverOption {
+                url: url.clone(),
+                source: "itunes".to_string(),
+                width: Some(1200),
+                height: Some(1200),
+                score: None,
+            }]
+        })
+        .unwrap_or_default();
+    LookupCandidate {
+        recording_mbid: String::new(),
+        release_mbid: String::new(),
+        artist: normalize_artist_display(&h.artist),
+        title: strip_title_mix_keywords(&h.title),
+        album: h.album.unwrap_or_default(),
+        album_artist: None,
+        track_number: None,
+        year: h.year,
+        cover_url: h.cover_url,
+        cover_options,
+        score: None,
+    }
+}
+
+fn candidate_from_youtube(artist: String, title: String, cover_url: Option<String>) -> LookupCandidate {
+    let cover_options = cover_url
+        .as_ref()
+        .map(|url| {
+            vec![CoverOption {
+                url: url.clone(),
+                source: "youtube".to_string(),
+                width: Some(480),
+                height: Some(360),
+                score: None,
+            }]
+        })
+        .unwrap_or_default();
+    LookupCandidate {
+        recording_mbid: String::new(),
+        release_mbid: String::new(),
+        artist: normalize_artist_display(&artist),
+        title: strip_title_mix_keywords(&title),
+        album: String::new(),
+        album_artist: None,
+        track_number: None,
+        year: None,
+        cover_url,
+        cover_options,
+        score: None,
+    }
+}
+
 pub async fn smart_lookup_one(
     _state: &MbState,
     client: &Client,
     deezer: &DeezerState,
     spotify: &SpotifyState,
     amazon: &AmazonState,
+    youtube: &YoutubeState,
     item: &LookupInput,
     matching: &MatchingOptions,
 ) -> Result<LookupResult, String> {
@@ -497,13 +653,15 @@ pub async fn smart_lookup_one(
     let cover_deadline = Instant::now() + Duration::from_secs(6);
     let stem = item.filename_stem.trim();
     let (seed_artist, seed_title) = infer_artist_title(&item.artist, &item.title, stem);
-    eprintln!(
-        "[smart_lookup_one] start path='{}' stem='{}' seed_artist='{}' seed_title='{}'",
-        item.path,
-        stem,
-        seed_artist,
-        seed_title
-    );
+    if matching.verbose_logs {
+        eprintln!(
+            "[smart_lookup_one] start path='{}' stem='{}' seed_artist='{}' seed_title='{}'",
+            item.path,
+            stem,
+            seed_artist,
+            seed_title
+        );
+    }
     let seed_artist_for_queries = if seed_artist.is_empty() {
         item.artist.as_str()
     } else {
@@ -518,6 +676,8 @@ pub async fn smart_lookup_one(
         client,
         deezer,
         spotify,
+        amazon,
+        youtube,
         &LookupInput {
             path: item.path.clone(),
             artist: seed_artist_for_queries.to_string(),
@@ -527,11 +687,13 @@ pub async fn smart_lookup_one(
         matching,
     )
     .await;
-    eprintln!(
-        "[smart_lookup_one] identified artists for path='{}': {:?}",
-        item.path,
-        artists
-    );
+    if matching.verbose_logs {
+        eprintln!(
+            "[smart_lookup_one] identified artists for path='{}': {:?}",
+            item.path,
+            artists
+        );
+    }
     let mut merged: Vec<LookupCandidate> = Vec::new();
     let mut cover_pool: Vec<RawCover> = Vec::new();
     let mut seen_cover_urls = HashSet::<String>::new();
@@ -579,7 +741,7 @@ pub async fn smart_lookup_one(
                     }
                     merged.push(candidate_from_deezer(h.artist, h.title, h.album, h.cover_url, h.year));
                 }
-                if dz_len > 0 {
+                if dz_len > 0 && matching.verbose_logs {
                     eprintln!(
                         "[smart_lookup_one] path='{}' deezer q='{}' hits={} pool {}->{}",
                         item.path,
@@ -614,7 +776,7 @@ pub async fn smart_lookup_one(
                     }
                     merged.push(candidate_from_spotify(h.artist, h.title, h.album, h.cover_url, h.year));
                 }
-                if sp_len > 0 {
+                if sp_len > 0 && matching.verbose_logs {
                     eprintln!(
                         "[smart_lookup_one] path='{}' spotify q='{}' hits={} pool {}->{}",
                         item.path,
@@ -627,7 +789,15 @@ pub async fn smart_lookup_one(
             }
             if matching.use_amazon {
                 let pool_before = cover_pool.len();
-                let hits = amazon_search_cover_urls(amazon, client, a, query_title, 8).await;
+                let hits = itunes_search_cover_urls(
+                    amazon,
+                    client,
+                    a,
+                    query_title,
+                    8,
+                    matching.verbose_logs,
+                )
+                .await;
                 if !hits.is_empty() {
                     searched_any = true;
                 }
@@ -646,7 +816,7 @@ pub async fn smart_lookup_one(
                         },
                     );
                 }
-                if hits_len > 0 {
+                if hits_len > 0 && matching.verbose_logs {
                     eprintln!(
                         "[smart_lookup_one] path='{}' itunes a='{}' title='{}' hits={} pool {}->{}",
                         item.path,
@@ -656,6 +826,64 @@ pub async fn smart_lookup_one(
                         pool_before,
                         cover_pool.len()
                     );
+                }
+            }
+            if matching.use_amazon {
+                let it_hits = itunes_search_tracks(
+                    amazon,
+                    client,
+                    a,
+                    query_title,
+                    (matching.limit as usize).max(8).min(15),
+                    matching.verbose_logs,
+                )
+                .await;
+                for h in it_hits {
+                    if let Some(url) = h.cover_url.clone() {
+                        push_raw_cover(
+                            &mut cover_pool,
+                            &mut seen_cover_urls,
+                            RawCover {
+                                url,
+                                source: "itunes",
+                                width: Some(1200),
+                                height: Some(1200),
+                                artist: Some(h.artist.clone()),
+                                title: Some(h.title.clone()),
+                            },
+                        );
+                    }
+                    merged.push(candidate_from_itunes(h));
+                    searched_any = true;
+                }
+            }
+            if matching.use_youtube {
+                let yt = youtube_search_tracks(
+                    youtube,
+                    client,
+                    a,
+                    query_title,
+                    (matching.limit as usize).max(4).min(10),
+                    matching.verbose_logs,
+                )
+                .await;
+                for h in yt {
+                    if let Some(url) = h.cover_url.clone() {
+                        push_raw_cover(
+                            &mut cover_pool,
+                            &mut seen_cover_urls,
+                            RawCover {
+                                url,
+                                source: "youtube",
+                                width: Some(480),
+                                height: Some(360),
+                                artist: Some(h.artist.clone()),
+                                title: Some(h.title.clone()),
+                            },
+                        );
+                    }
+                    merged.push(candidate_from_youtube(h.artist, h.title, h.cover_url));
+                    searched_any = true;
                 }
             }
             if cover_pool.len() >= 4 {
@@ -716,27 +944,56 @@ pub async fn smart_lookup_one(
                 merged.push(candidate_from_spotify(h.artist, h.title, h.album, h.cover_url, h.year));
             }
         }
-        for hit in amazon_search_cover_urls(
-            amazon,
-            client,
-            seed_artist_for_queries,
-            seed_title_for_queries,
-            6,
-        )
-        .await
-        {
-            push_raw_cover(
-                &mut cover_pool,
-                &mut seen_cover_urls,
-                RawCover {
-                    url: hit.url,
-                    source: "itunes",
-                    width: None,
-                    height: None,
-                    artist: Some(seed_artist_for_queries.to_string()),
-                    title: Some(seed_title_for_queries.to_string()),
-                },
-            );
+        if matching.use_amazon {
+            for hit in itunes_search_cover_urls(
+                amazon,
+                client,
+                seed_artist_for_queries,
+                seed_title_for_queries,
+                6,
+                matching.verbose_logs,
+            )
+            .await
+            {
+                push_raw_cover(
+                    &mut cover_pool,
+                    &mut seen_cover_urls,
+                    RawCover {
+                        url: hit.url,
+                        source: "itunes",
+                        width: None,
+                        height: None,
+                        artist: Some(seed_artist_for_queries.to_string()),
+                        title: Some(seed_title_for_queries.to_string()),
+                    },
+                );
+            }
+            let it_hits = itunes_search_tracks(
+                amazon,
+                client,
+                seed_artist_for_queries,
+                seed_title_for_queries,
+                (matching.limit as usize).max(8).min(15),
+                matching.verbose_logs,
+            )
+            .await;
+            for h in it_hits {
+                merged.push(candidate_from_itunes(h));
+            }
+        }
+        if matching.use_youtube {
+            let yt_hits = youtube_search_tracks(
+                youtube,
+                client,
+                seed_artist_for_queries,
+                seed_title_for_queries,
+                (matching.limit as usize).max(4).min(10),
+                matching.verbose_logs,
+            )
+            .await;
+            for h in yt_hits {
+                merged.push(candidate_from_youtube(h.artist, h.title, h.cover_url));
+            }
         }
     }
 
@@ -759,17 +1016,19 @@ pub async fn smart_lookup_one(
     let mut candidates = dedupe_and_sort(merged, stem);
     attach_best_cover_options(&mut candidates, &cover_pool);
     let (confidence, _) = confidence_for(&candidates, stem);
-    eprintln!(
-        "[smart_lookup_one] end path='{}' candidates={} cover_pool={} first_cover_opts={} elapsedMs={}",
-        item.path,
-        candidates.len(),
-        cover_pool.len(),
-        candidates
-            .first()
-            .map(|c| c.cover_options.len())
-            .unwrap_or(0),
-        started.elapsed().as_millis()
-    );
+    if matching.verbose_logs {
+        eprintln!(
+            "[smart_lookup_one] end path='{}' candidates={} cover_pool={} first_cover_opts={} elapsedMs={}",
+            item.path,
+            candidates.len(),
+            cover_pool.len(),
+            candidates
+                .first()
+                .map(|c| c.cover_options.len())
+                .unwrap_or(0),
+            started.elapsed().as_millis()
+        );
+    }
     Ok(LookupResult {
         path: item.path.clone(),
         candidates,
@@ -797,4 +1056,57 @@ pub async fn musicbrainz_only_lookup_one(
         confidence,
         artist_guesses: split_artist_tokens(&item.artist),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk_candidate(artist: &str, title: &str, source: &str) -> LookupCandidate {
+        LookupCandidate {
+            recording_mbid: String::new(),
+            release_mbid: String::new(),
+            artist: artist.to_string(),
+            title: title.to_string(),
+            album: String::new(),
+            album_artist: None,
+            track_number: None,
+            year: None,
+            cover_url: Some("https://x/y.jpg".into()),
+            cover_options: vec![CoverOption {
+                url: "https://x/y.jpg".into(),
+                source: source.to_string(),
+                width: Some(1200),
+                height: Some(1200),
+                score: None,
+            }],
+            score: None,
+        }
+    }
+
+    #[test]
+    fn strict_filter_keeps_only_top_relevant_candidates() {
+        let stem = "Layla Benitez All The Time";
+        let cands = vec![
+            mk_candidate("Layla Benitez", "All The Time", "deezer"),
+            mk_candidate("Layla Benitez", "All The Time (Live)", "youtube"),
+            mk_candidate("Random Artist", "Unrelated Track", "youtube"),
+            mk_candidate("Another Artist", "Different Song", "spotify"),
+        ];
+        let out = apply_dynamic_relevance_filter(cands, stem);
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|c| c.artist.to_lowercase().contains("layla") || c.title.to_lowercase().contains("all the time")));
+    }
+
+    #[test]
+    fn balanced_filter_preserves_multiple_candidates_when_uncertain() {
+        let stem = "DNA";
+        let cands = vec![
+            mk_candidate("Adam Beyer", "DNA", "deezer"),
+            mk_candidate("Kendrick Lamar", "DNA.", "itunes"),
+            mk_candidate("Empire of the Sun", "DNA", "youtube"),
+        ];
+        let out = apply_dynamic_relevance_filter(cands, stem);
+        assert!(out.len() >= 2);
+    }
 }

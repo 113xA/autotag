@@ -195,12 +195,12 @@ pub fn build_rename_path(
         .and_then(|e| e.to_str())
         .unwrap_or("mp3");
     let base = format!("{stem}.{ext}");
-    Ok(unique_path(parent.join(base)))
+    unique_available_path(parent.join(base))
 }
 
-fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
+pub fn unique_available_path(path: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
     if !path.exists() {
-        return path;
+        return Ok(path);
     }
     let parent = path.parent().unwrap_or(std::path::Path::new("."));
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
@@ -212,10 +212,10 @@ fn unique_path(path: std::path::PathBuf) -> std::path::PathBuf {
             parent.join(format!("{stem} ({i}).{ext}"))
         };
         if !candidate.exists() {
-            return candidate;
+            return Ok(candidate);
         }
     }
-    path
+    Err("no available unique file name (2-999 exhausted)".to_string())
 }
 
 /// Final file name after rename rules (for UI preview).

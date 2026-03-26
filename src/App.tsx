@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyBatch,
   batchLookup,
   clearSessionSnapshot,
-  loadSessionSnapshot,
-  musicbrainzLookupOne,
   proposedFromTrack,
-  saveSessionSnapshot,
   scanFolder,
 } from "./api/tauri";
 import { LoadingOverlay } from "./components/LoadingOverlay";
@@ -17,6 +13,9 @@ import { Logo } from "./components/Logo";
 import { OptionsMenu } from "./components/OptionsMenu";
 import { RekordboxXmlPage } from "./components/RekordboxXmlPage";
 import { ReviewDeck } from "./components/ReviewDeck";
+import { useAutotagSession } from "./hooks/useAutotagSession";
+import { useLookupActions } from "./hooks/useLookupActions";
+import { useLookupEvents } from "./hooks/useLookupEvents";
 import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
 import type { AppSettings, RenameSettings } from "./options/types";
@@ -25,7 +24,6 @@ import type {
   ProposedTags,
   ReviewTrack,
   ScannedTrack,
-  LookupResult,
 } from "./types";
 import { parseU32 } from "./utils/parse";
 import "./App.css";
@@ -33,28 +31,11 @@ import "./App.css";
 type Phase = "import" | "review" | "apply_done";
 type PageView = "home" | "autotag" | "clean_names" | "rekordbox_xml";
 
-type LookupResultEventPayload = {
-  run_id: number;
-  result: LookupResult;
-};
 type LookupProgressState = {
   active: boolean;
   done: number;
   total: number;
 };
-type SessionSnapshot = {
-  view: PageView;
-  phase: Phase;
-  folder: string | null;
-  settings: AppSettings;
-  tracks: ReviewTrack[];
-  working: ProposedTags | null;
-  error: string | null;
-  applyOutcomes: { path: string; ok: boolean; error: string | null }[] | null;
-  acceptedPayloads: ApplyPayload[];
-  lookupProgress: LookupProgressState;
-};
-
 function toReviewTracks(
   scanned: ScannedTrack[],
   lookupByPath: Map<
@@ -135,10 +116,7 @@ export default function App() {
   });
   const [lookupCurrentPath, setLookupCurrentPath] = useState<string | null>(null);
   const [singleLookupPath, setSingleLookupPath] = useState<string | null>(null);
-  const [savedSession, setSavedSession] = useState<SessionSnapshot | null>(null);
-  const [resumeChecked, setResumeChecked] = useState(false);
   const lookupRunIdRef = useRef(0);
-  const autosaveTimerRef = useRef<number | null>(null);
 
   const { progress, clearProgress } = useProgressEvents(true);
 
@@ -170,39 +148,19 @@ export default function App() {
     );
   }, []);
 
-  useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-    void (async () => {
-      unlisten = await listen<LookupResultEventPayload>(
-        "lookup_result",
-        (e) => {
-          const payload = e.payload;
-          if (payload.run_id !== lookupRunIdRef.current) return;
-          const firstCoverOpts =
-            payload.result.candidates[0]?.coverOptions?.length ?? 0;
-          console.debug("[lookup_result]", {
-            path: payload.result.path,
-            candidates: payload.result.candidates.length,
-            firstCoverOpts,
-          });
-          mergeLookupResults([payload.result]);
-        },
-      );
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, [mergeLookupResults]);
+  useLookupEvents(mergeLookupResults, lookupRunIdRef, settings.matching.verboseLogs);
 
   useEffect(() => {
     if (!progress || progress.kind !== "lookup") return;
     // Verbose debugging: see exactly which track lookup is currently running.
-    console.debug("[lookup-progress]", {
-      active: lookupProgress.active,
-      done: progress.done,
-      total: progress.total,
-      message: progress.message ?? null,
-    });
+    if (settings.matching.verboseLogs) {
+      console.debug("[lookup-progress]", {
+        active: lookupProgress.active,
+        done: progress.done,
+        total: progress.total,
+        message: progress.message ?? null,
+      });
+    }
 
     if (!lookupProgress.active) return;
     if (progress.message) {
@@ -214,23 +172,7 @@ export default function App() {
       const done = Math.min(progress.done, total || progress.done);
       return { ...prev, done, total };
     });
-  }, [lookupProgress.active, progress]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadSessionSnapshot()
-      .then((raw) => {
-        if (cancelled) return;
-        const snap = raw as SessionSnapshot | null;
-        setSavedSession(snap && snap.tracks ? snap : null);
-      })
-      .finally(() => {
-        if (!cancelled) setResumeChecked(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [lookupProgress.active, progress, settings.matching.verboseLogs]);
 
   const updateSettings = useCallback((next: AppSettings) => {
     setSettings(next);
@@ -262,12 +204,14 @@ export default function App() {
 
   useEffect(() => {
     if (!current) return;
-    console.debug("[covers-current]", {
-      path: current.path,
-      candidateIndex: current.candidateIndex,
-      coverCount: currentCoverCount,
-    });
-  }, [current?.path, current?.candidateIndex, currentCoverCount]);
+    if (settings.matching.verboseLogs) {
+      console.debug("[covers-current]", {
+        path: current.path,
+        candidateIndex: current.candidateIndex,
+        coverCount: currentCoverCount,
+      });
+    }
+  }, [current?.path, current?.candidateIndex, currentCoverCount, settings.matching.verboseLogs]);
   const allDone = tracks.length > 0 && pendingCount === 0;
   const hasActiveWork =
     tracks.length > 0 ||
@@ -276,19 +220,28 @@ export default function App() {
     folder !== null ||
     phase !== "import";
 
-  const applySnapshot = useCallback((snap: SessionSnapshot) => {
-    setView(snap.view);
-    setPhase(snap.phase);
-    setFolder(snap.folder);
-    setSettings(snap.settings);
-    saveSettings(snap.settings);
-    setTracks(snap.tracks);
-    setWorking(snap.working);
-    setError(snap.error);
-    setApplyOutcomes(snap.applyOutcomes);
-    setAcceptedPayloads(snap.acceptedPayloads);
-    setLookupProgress(snap.lookupProgress);
-  }, []);
+  const { savedSession, setSavedSession, resumeChecked, applySnapshot } = useAutotagSession({
+    view,
+    phase,
+    folder,
+    settings,
+    tracks,
+    working,
+    error,
+    applyOutcomes,
+    acceptedPayloads,
+    lookupProgress,
+    setView,
+    setPhase,
+    setFolder,
+    setSettings,
+    setTracks,
+    setWorking,
+    setError,
+    setApplyOutcomes,
+    setAcceptedPayloads,
+    setLookupProgress,
+  });
 
   const goHome = useCallback(() => {
     if (view === "home") return;
@@ -313,6 +266,7 @@ export default function App() {
       const scanned = await scanFolder(dir, settings.cleaning);
       if (scanned.length === 0) {
         setError("No supported audio files found (mp3, flac, m4a, ogg, opus).");
+        setLongTask(false);
         return;
       }
       const review = toReviewTracks(scanned, new Map());
@@ -329,7 +283,11 @@ export default function App() {
       setPhase("review");
       setLongTask(false);
 
-      if (items.length === 0) return;
+      if (items.length === 0 || !settings.autoLookupOnImport) {
+        setLookupProgress({ active: false, done: 0, total: 0 });
+        setLookupCurrentPath(null);
+        return;
+      }
       setLookupProgress({ active: true, done: 0, total: items.length });
       setLookupCurrentPath(null);
       void (async () => {
@@ -405,65 +363,60 @@ export default function App() {
     })();
   };
 
-  const bumpCandidate = useCallback((delta: number) => {
-    setTracks((ts) => {
-      const curPath = ts.find((t) => t.reviewStatus === "pending")?.path;
-      if (!curPath) return ts;
-      return ts.map((t) => {
-        if (t.path !== curPath) return t;
-        const n = t.candidates.length;
-        if (n === 0) return t;
-        const next = (t.candidateIndex + delta + n) % n;
-        return { ...t, candidateIndex: next };
+  const {
+    bumpCandidate,
+    rerunSingleLookup,
+    handleGuessArtist,
+    handleMusicbrainzLookup,
+  } = useLookupActions({
+    matching: settings.matching,
+    lookupRunIdRef,
+    setTracks,
+    setSingleLookupPath,
+    setError,
+    mergeLookupResults,
+    current,
+    working,
+  });
+
+  // When switching candidates, some matches may not have full cover options yet.
+  // Auto-refresh covers for the selected match using its artist/title.
+  const coverRerunKeyRef = useRef<{ path: string; key: string } | null>(null);
+  useEffect(() => {
+    if (!current) return;
+    if (singleLookupPath === current.path) return; // already refreshing this track
+
+    const c = current.candidates[current.candidateIndex];
+    if (!c) return;
+
+    const coverCount = c.coverOptions?.length ?? 0;
+    const needRefresh = coverCount < 4 || !c.coverUrl;
+    if (!needRefresh) return;
+
+    const key = `${c.artist}|||${c.title}`;
+    if (coverRerunKeyRef.current?.path === current.path) {
+      if (coverRerunKeyRef.current.key === key) return; // already tried for this match
+    }
+
+    coverRerunKeyRef.current = { path: current.path, key };
+    if (settings.matching.verboseLogs) {
+      console.debug("[candidate-cover-refresh]", {
+        path: current.path,
+        candidateIndex: current.candidateIndex,
+        coverCount,
+        artist: c.artist,
+        title: c.title,
       });
-    });
-  }, []);
-
-  const rerunSingleLookup = useCallback(
-    async (path: string, artist: string, title: string, filenameStem: string) => {
-      setSingleLookupPath(path);
-      try {
-        const one = await batchLookup(
-          [{ path, artist, title, filenameStem }],
-          settings.matching,
-          lookupRunIdRef.current,
-        );
-        mergeLookupResults(one);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setSingleLookupPath((prev) => (prev === path ? null : prev));
-      }
-    },
-    [mergeLookupResults, settings.matching],
-  );
-
-  const rerunSingleMusicbrainz = useCallback(
-    async (path: string, artist: string, title: string, filenameStem: string) => {
-      setSingleLookupPath(path);
-      try {
-        const one = await musicbrainzLookupOne(
-          { path, artist, title, filenameStem },
-          settings.matching,
-        );
-        mergeLookupResults([one]);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setSingleLookupPath((prev) => (prev === path ? null : prev));
-      }
-    },
-    [mergeLookupResults, settings.matching],
-  );
-
-  const handleGuessArtist = useCallback(
-    (artistGuess: string) => {
-      if (!current) return;
-      const title = working?.title?.trim() || current.cleaned.searchTitle;
-      void rerunSingleLookup(current.path, artistGuess, title, current.filenameStem);
-    },
-    [current, rerunSingleLookup, working?.title],
-  );
+    }
+    void rerunSingleLookup(current.path, c.artist, c.title, current.filenameStem);
+  }, [
+    current,
+    current?.path,
+    current?.candidateIndex,
+    singleLookupPath,
+    rerunSingleLookup,
+    settings.matching.verboseLogs,
+  ]);
 
   const handleSwapArtistTitle = useCallback(() => {
     setWorking((prev) => {
@@ -475,13 +428,6 @@ export default function App() {
       };
     });
   }, []);
-
-  const handleMusicbrainzLookup = useCallback(() => {
-    if (!current) return;
-    const artist = working?.artist?.trim() || current.cleaned.searchArtist;
-    const title = working?.title?.trim() || current.cleaned.searchTitle;
-    void rerunSingleMusicbrainz(current.path, artist, title, current.filenameStem);
-  }, [current, rerunSingleMusicbrainz, working?.artist, working?.title]);
 
   const handleAccept = useCallback(() => {
     if (!current || !working) return;
@@ -577,42 +523,25 @@ export default function App() {
     setSavedSession(null);
   };
 
-  useEffect(() => {
-    if (autosaveTimerRef.current !== null) {
-      window.clearTimeout(autosaveTimerRef.current);
-    }
-    autosaveTimerRef.current = window.setTimeout(() => {
-      const snapshot: SessionSnapshot = {
-        view,
-        phase,
-        folder,
-        settings,
-        tracks,
-        working,
-        error,
-        applyOutcomes,
-        acceptedPayloads,
-        lookupProgress,
-      };
-      void saveSessionSnapshot(snapshot).then(() => setSavedSession(snapshot));
-    }, 500);
-    return () => {
-      if (autosaveTimerRef.current !== null) {
-        window.clearTimeout(autosaveTimerRef.current);
-      }
-    };
-  }, [
-    acceptedPayloads,
-    applyOutcomes,
-    error,
-    folder,
-    lookupProgress,
-    phase,
-    settings,
-    tracks,
-    view,
-    working,
-  ]);
+  const coverProgressTotal = useMemo(() => tracks.length * 4, [tracks]);
+  const coverProgressDone = useMemo(
+    () =>
+      tracks.reduce((acc, t) => {
+        const best = t.candidates.reduce(
+          (mx, c) => Math.max(mx, c.coverOptions?.length ?? 0),
+          0,
+        );
+        return acc + Math.min(best, 4);
+      }, 0),
+    [tracks],
+  );
+  const currentReviewData = useMemo(() => {
+    if (!current) return null;
+    const currentCandidate = current.candidates[current.candidateIndex];
+    const currentCoverCount = currentCandidate?.coverOptions?.length ?? 0;
+    const coverSearchActive = lookupProgress.active || singleLookupPath === current.path;
+    return { currentCoverCount, coverSearchActive };
+  }, [current, lookupProgress.active, singleLookupPath]);
 
   return (
     <div className="app-shell">
@@ -724,21 +653,6 @@ export default function App() {
                 <span className="quick-action-title">Rekordbox XML import/export</span>
                 <span className="quick-action-sub">Import XML, match tracks, apply Rekordbox fields.</span>
               </button>
-              {folder && (
-                <button
-                  type="button"
-                  className="quick-action-card"
-                  onClick={async () => {
-                    setView("autotag");
-                    setPhase("import");
-                    await pickFolder();
-                  }}
-                  disabled={longTask}
-                >
-                  <span className="quick-action-title">Choose another music folder</span>
-                  <span className="quick-action-sub">Start a new autotag import session.</span>
-                </button>
-              )}
               <button
                 type="button"
                 className="quick-action-card"
@@ -797,16 +711,6 @@ export default function App() {
 
         {view === "autotag" && phase === "review" && (
           <>
-            {(() => {
-              const coverProgressTotal = tracks.length * 4;
-              const coverProgressDone = tracks.reduce((acc, t) => {
-                const best = t.candidates.reduce(
-                  (mx, c) => Math.max(mx, c.coverOptions?.length ?? 0),
-                  0,
-                );
-                return acc + Math.min(best, 4);
-              }, 0);
-              return (
             <section className="toolbar">
               <div className="toolbar-inner">
                 <span className="stat stat-pill">
@@ -861,8 +765,6 @@ export default function App() {
                 </div>
               )}
             </section>
-              );
-            })()}
 
             {error && <div className="banner error">{error}</div>}
 
@@ -916,19 +818,12 @@ export default function App() {
               </section>
             )}
 
-            {current && working && !allDone && (
-              (() => {
-                const currentCandidate = current.candidates[current.candidateIndex];
-                const currentCoverCount = currentCandidate?.coverOptions?.length ?? 0;
-                const coverSearchActive =
-                  lookupProgress.active ||
-                  singleLookupPath === current.path;
-                return (
+            {current && working && !allDone && currentReviewData && (
               <ReviewDeck
                 track={current}
                 proposed={working}
-                coverSearchActive={coverSearchActive}
-                coverSearchCount={currentCoverCount}
+                coverSearchActive={currentReviewData.coverSearchActive}
+                coverSearchCount={currentReviewData.currentCoverCount}
                 coverSearchTotal={4}
                 onProposedChange={setWorking}
                 onPrevCandidate={() => bumpCandidate(-1)}
@@ -940,8 +835,6 @@ export default function App() {
                 onMusicbrainzLookup={handleMusicbrainzLookup}
                 rename={settings.rename}
               />
-                );
-              })()
             )}
           </>
         )}

@@ -1,5 +1,5 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
-import { useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { previewRename } from "../api/tauri";
 import type { RenameSettings } from "../options/types";
 import type { ProposedTags, ReviewTrack, TagSnapshot } from "../types";
@@ -68,7 +68,7 @@ function fmtCurrent(t: TagSnapshot, key: keyof TagSnapshot): string {
   return String(v);
 }
 
-export function ReviewDeck({
+function ReviewDeckInner({
   track,
   proposed,
   coverSearchActive,
@@ -100,6 +100,8 @@ export function ReviewDeck({
     setCoverFailed(false);
   }, [proposed.coverUrl]);
 
+  const renamePreviewDebounceRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!rename.enabled) {
       setNewNamePreview(null);
@@ -114,15 +116,23 @@ export function ReviewDeck({
       return;
     }
     let cancel = false;
-    previewRename(track.path, a, t, album, year, rename)
-      .then((nm) => {
-        if (!cancel) setNewNamePreview(nm);
-      })
-      .catch(() => {
-        if (!cancel) setNewNamePreview(null);
-      });
+    if (renamePreviewDebounceRef.current !== null) {
+      window.clearTimeout(renamePreviewDebounceRef.current);
+    }
+    renamePreviewDebounceRef.current = window.setTimeout(() => {
+      void previewRename(track.path, a, t, album, year, rename)
+        .then((nm) => {
+          if (!cancel) setNewNamePreview(nm);
+        })
+        .catch(() => {
+          if (!cancel) setNewNamePreview(null);
+        });
+    }, 300);
     return () => {
       cancel = true;
+      if (renamePreviewDebounceRef.current !== null) {
+        window.clearTimeout(renamePreviewDebounceRef.current);
+      }
     };
   }, [
     rename.enabled,
@@ -138,6 +148,20 @@ export function ReviewDeck({
     proposed.album,
     proposed.year,
   ]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        onAccept();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        onSkip();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onAccept, onSkip]);
 
   const n = track.candidates.length;
   const currentName = track.fileName || basename(track.path);
@@ -185,8 +209,7 @@ export function ReviewDeck({
   return (
     <div className="deck-wrap">
       <div className="deck-hint deck-hint-pill">
-        Drag the cover area right to accept, left to skip — or use the buttons
-        below.
+        Drag right to accept, left to skip — or use Arrow Right / Arrow Left.
       </div>
       <div className="review-card">
         <motion.div
@@ -261,6 +284,16 @@ export function ReviewDeck({
           </div>
           <div className="cover-options-block">
             <div className="cover-options-title">Cover proposals</div>
+            <div className="row" style={{ marginTop: "0.15rem", marginBottom: "0.35rem" }}>
+              <button
+                type="button"
+                className={`btn btn-secondary ${proposed.coverUrl ? "" : "selected"}`}
+                onClick={() => onProposedChange({ ...proposed, coverUrl: null })}
+                title="Use no cover for this track"
+              >
+                None (remove cover)
+              </button>
+            </div>
             {coverOptions.length > 0 ? (
               <div className="cover-options-grid">
                 {coverOptions.slice(0, 4).map((opt) => {
@@ -290,16 +323,18 @@ export function ReviewDeck({
                 Searching covers... {Math.min(coverSearchCount, coverSearchTotal)} / {coverSearchTotal}
               </div>
             )}
-            <progress
-              className="lookup-progress-bar"
-              max={coverSearchTotal}
-              value={Math.min(coverSearchCount, coverSearchTotal)}
-              aria-label="Current track cover progress"
-            />
+            {coverSearchActive && (
+              <progress
+                className="lookup-progress-bar"
+                max={coverSearchTotal}
+                value={Math.min(coverSearchCount, coverSearchTotal)}
+                aria-label="Current track cover progress"
+              />
+            )}
           </div>
           <div className="row" style={{ marginTop: "0.45rem" }}>
             <button type="button" className="btn btn-secondary" onClick={onMusicbrainzLookup}>
-              muzicbrainz
+              MusicBrainz
             </button>
           </div>
         </div>
@@ -412,3 +447,5 @@ export function ReviewDeck({
     </div>
   );
 }
+
+export const ReviewDeck = memo(ReviewDeckInner);

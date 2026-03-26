@@ -10,6 +10,7 @@ mod options;
 mod rekordbox_xml;
 mod smart_lookup;
 mod spotify;
+mod youtube;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -25,7 +26,7 @@ use crate::cover_art::{placeholder_cover_png_bytes, resolve_cover_art, CoverReso
 use crate::filename_clean::clean_filename_stem;
 use crate::metadata::{
     build_rename_path, preview_rename_filename, read_tag_snapshot, sanitize_path_component,
-    write_rekordbox_tags,
+    unique_available_path, write_rekordbox_tags,
     write_tags, WriteTagInput,
 };
 use crate::models::{
@@ -146,6 +147,7 @@ async fn batch_lookup(
     deezer: tauri::State<'_, deezer::DeezerState>,
     spotify: tauri::State<'_, SpotifyState>,
     amazon: tauri::State<'_, amazon::AmazonState>,
+    youtube: tauri::State<'_, youtube::YoutubeState>,
     items: Vec<LookupInput>,
     matching: MatchingOptions,
     run_id: u64,
@@ -166,26 +168,31 @@ async fn batch_lookup(
             message: None,
         },
     );
-    eprintln!(
-        "[batch_lookup] start total={} items kind=lookup",
-        total
-    );
+    if matching.verbose_logs {
+        eprintln!(
+            "[batch_lookup] start total={} items kind=lookup",
+            total
+        );
+    }
     let client = state.client.clone();
     let mut results = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
         let started = Instant::now();
-        eprintln!(
-            "[batch_lookup] ({}/{}) start path={}",
-            i + 1,
-            total,
-            item.path
-        );
+        if matching.verbose_logs {
+            eprintln!(
+                "[batch_lookup] ({}/{}) start path={}",
+                i + 1,
+                total,
+                item.path
+            );
+        }
         let one = smart_lookup::smart_lookup_one(
             &state,
             &client,
             &deezer,
             &spotify,
             &amazon,
+            &youtube,
             item,
             &matching,
         )
@@ -200,21 +207,23 @@ async fn batch_lookup(
         );
 
         results.push(one);
-        eprintln!(
-            "[batch_lookup] ({}/{}) done path={} candidates={} coverOptionsFirst={:?} elapsedMs={}",
-            i + 1,
-            total,
-            item.path,
-            results
-                .last()
-                .map(|r| r.candidates.len())
-                .unwrap_or(0),
-            results
-                .last()
-                .and_then(|r| r.candidates.first())
-                .map(|c| c.cover_options.len()),
-            started.elapsed().as_millis()
-        );
+        if matching.verbose_logs {
+            eprintln!(
+                "[batch_lookup] ({}/{}) done path={} candidates={} coverOptionsFirst={:?} elapsedMs={}",
+                i + 1,
+                total,
+                item.path,
+                results
+                    .last()
+                    .map(|r| r.candidates.len())
+                    .unwrap_or(0),
+                results
+                    .last()
+                    .and_then(|r| r.candidates.first())
+                    .map(|c| c.cover_options.len()),
+                started.elapsed().as_millis()
+            );
+        }
         emit_progress(
             &app,
             ProgressPayload {
@@ -225,7 +234,9 @@ async fn batch_lookup(
             },
         );
     }
-    eprintln!("[batch_lookup] done total={}", total);
+    if matching.verbose_logs {
+        eprintln!("[batch_lookup] done total={}", total);
+    }
     Ok(results)
 }
 
@@ -421,26 +432,6 @@ async fn match_rekordbox_library(
     .map_err(|e| e.to_string())?
 }
 
-fn unique_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    for i in 2..1000 {
-        let candidate = if ext.is_empty() {
-            parent.join(format!("{stem} ({i})"))
-        } else {
-            parent.join(format!("{stem} ({i}).{ext}"))
-        };
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    path
-}
-
 #[tauri::command]
 async fn clean_rename_batch(req: CleanRenameBatchRequest) -> Result<Vec<CleanRenameOutcome>, String> {
     let mut outcomes = Vec::with_capacity(req.items.len());
@@ -474,7 +465,18 @@ async fn clean_rename_batch(req: CleanRenameBatchRequest) -> Result<Vec<CleanRen
         } else {
             parent.join(format!("{stem}.{ext}"))
         };
-        let next = unique_path(candidate);
+        let next = match unique_available_path(candidate) {
+            Ok(v) => v,
+            Err(e) => {
+                outcomes.push(CleanRenameOutcome {
+                    path: item.path,
+                    next_path: None,
+                    ok: false,
+                    error: Some(e),
+                });
+                continue;
+            }
+        };
         if next == p {
             outcomes.push(CleanRenameOutcome {
                 path: item.path.clone(),
@@ -666,6 +668,7 @@ pub fn run() {
         .manage(deezer::DeezerState::new())
         .manage(SpotifyState::new())
         .manage(amazon::AmazonState::new())
+        .manage(youtube::YoutubeState::new())
         .invoke_handler(tauri::generate_handler![
             scan_folder,
             batch_lookup,
