@@ -5,6 +5,8 @@ export type TagSnapshot = {
   albumArtist: string | null;
   trackNumber: number | null;
   year: number | null;
+  /** File already has embedded cover art (from scan). */
+  hasEmbeddedCover?: boolean;
 };
 
 export type CleanedFilename = {
@@ -32,6 +34,8 @@ export type ApplyPayload = {
   year: number | null;
   coverUrl: string | null;
   releaseMbid: string | null;
+  /** User chose to strip cover; do not reuse embedded art from file. */
+  removeEmbeddedCover?: boolean;
 };
 
 export type LookupCandidate = {
@@ -78,6 +82,8 @@ export type ProposedTags = {
   year: string;
   coverUrl: string | null;
   releaseMbid: string | null;
+  /** Set when user clicks "None (remove cover)" so apply strips embedded art. */
+  explicitlyNoCover?: boolean;
 };
 
 export type ApplyOutcome = {

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyBatch,
@@ -26,6 +33,11 @@ import type {
   ScannedTrack,
 } from "./types";
 import { parseU32 } from "./utils/parse";
+import {
+  bindAppScrollContainer,
+  readDocumentScrollY,
+  scheduleScrollAndReviewFocusRestore,
+} from "./utils/scrollRestore";
 import "./App.css";
 
 type Phase = "import" | "review" | "apply_done";
@@ -35,6 +47,14 @@ type LookupProgressState = {
   active: boolean;
   done: number;
   total: number;
+};
+
+type BackgroundCoverLookupState = {
+  active: boolean;
+  done: number;
+  total: number;
+  /** Lookup in progress for the track currently shown in review (spinner only). */
+  workingOnCurrentFile: boolean;
 };
 function toReviewTracks(
   scanned: ScannedTrack[],
@@ -57,6 +77,18 @@ function toReviewTracks(
   }));
 }
 
+/** True if the current candidate already has usable cover art (no extra lookup needed). */
+function currentTrackHasCoverArt(track: ReviewTrack): boolean {
+  const c = track.candidates[track.candidateIndex];
+  const p = proposedFromTrack(track);
+  if (p.explicitlyNoCover) return false;
+  if (p.coverUrl?.trim()) return true;
+  if (c?.coverUrl?.trim()) return true;
+  if ((c?.coverOptions?.length ?? 0) > 0) return true;
+  if (track.current.hasEmbeddedCover) return true;
+  return false;
+}
+
 function buildApplyPart(path: string, p: ProposedTags): ApplyPayload {
   const tn = p.trackNumber.trim();
   const yr = p.year.trim();
@@ -71,6 +103,22 @@ function buildApplyPart(path: string, p: ProposedTags): ApplyPayload {
     year: yr ? parseU32(yr) : null,
     coverUrl: p.coverUrl,
     releaseMbid: rm || null,
+    removeEmbeddedCover: p.explicitlyNoCover === true,
+  };
+}
+
+/** Restore proposed tags from a stored apply payload (undo accept). */
+function proposedFromApplyPayload(p: ApplyPayload): ProposedTags {
+  return {
+    artist: p.artist,
+    title: p.title,
+    album: p.album,
+    albumArtist: p.albumArtist?.trim() ?? "",
+    trackNumber: p.trackNumber != null ? String(p.trackNumber) : "",
+    year: p.year != null ? String(p.year) : "",
+    coverUrl: p.coverUrl,
+    releaseMbid: p.releaseMbid?.trim() ? p.releaseMbid.trim() : null,
+    explicitlyNoCover: p.removeEmbeddedCover === true,
   };
 }
 
@@ -116,7 +164,46 @@ export default function App() {
   });
   const [lookupCurrentPath, setLookupCurrentPath] = useState<string | null>(null);
   const [singleLookupPath, setSingleLookupPath] = useState<string | null>(null);
+  const [backgroundCoverLookup, setBackgroundCoverLookup] =
+    useState<BackgroundCoverLookupState>({
+      active: false,
+      done: 0,
+      total: 0,
+      workingOnCurrentFile: false,
+    });
+  const workingTrackKeyRef = useRef<string | null>(null);
+  /** LIFO undo for Accept / Skip during review (path + kind). */
+  const reviewNavStackRef = useRef<{ kind: "accept" | "skip"; path: string }[]>(
+    [],
+  );
+  /** Bumps when the nav stack changes so the Back button disabled state updates. */
+  const [reviewNavRev, setReviewNavRev] = useState(0);
+  /** When set, the pending track with this path is shown first (after Back). */
+  const [resumeReviewPath, setResumeReviewPath] = useState<string | null>(null);
+  const resumeReviewPathRef = useRef<string | null>(null);
+  const acceptedPayloadsRef = useRef(acceptedPayloads);
   const lookupRunIdRef = useRef(0);
+  const reviewDeckAnchorRef = useRef<HTMLDivElement>(null);
+  const coverAutoSearchAttemptedRef = useRef<Set<string>>(new Set());
+  const coverAutoSearchDeclinedRef = useRef<Set<string>>(new Set());
+  const backgroundCoverPassLockRef = useRef(false);
+  const tracksRef = useRef(tracks);
+  const lookupProgressActiveRef = useRef(lookupProgress.active);
+  const singleLookupPathRef = useRef(singleLookupPath);
+  const longTaskRef = useRef(longTask);
+  const viewRef = useRef(view);
+  const phaseRef = useRef(phase);
+  const settingsMatchingRef = useRef(settings.matching);
+
+  tracksRef.current = tracks;
+  resumeReviewPathRef.current = resumeReviewPath;
+  acceptedPayloadsRef.current = acceptedPayloads;
+  lookupProgressActiveRef.current = lookupProgress.active;
+  singleLookupPathRef.current = singleLookupPath;
+  longTaskRef.current = longTask;
+  viewRef.current = view;
+  phaseRef.current = phase;
+  settingsMatchingRef.current = settings.matching;
 
   const { progress, clearProgress } = useProgressEvents(true);
 
@@ -179,21 +266,40 @@ export default function App() {
     saveSettings(next);
   }, []);
 
-  const current = useMemo(
-    () => tracks.find((t) => t.reviewStatus === "pending"),
-    [tracks],
-  );
+  const current = useMemo(() => {
+    const pending = tracks.filter((t) => t.reviewStatus === "pending");
+    if (pending.length === 0) return undefined;
+    if (resumeReviewPath) {
+      const hit = pending.find((t) => t.path === resumeReviewPath);
+      if (hit) return hit;
+    }
+    return pending[0];
+  }, [tracks, resumeReviewPath]);
 
   useEffect(() => {
     if (!current) {
+      workingTrackKeyRef.current = null;
       setWorking(null);
       return;
     }
+    const key = `${current.path}:${current.candidateIndex}`;
+    if (workingTrackKeyRef.current === key) {
+      return;
+    }
+    workingTrackKeyRef.current = key;
     setWorking(proposedFromTrack(current));
   }, [current]);
 
   const pendingCount = useMemo(
     () => tracks.filter((t) => t.reviewStatus === "pending").length,
+    [tracks],
+  );
+
+  const pendingMissingCoverCount = useMemo(
+    () =>
+      tracks.filter(
+        (t) => t.reviewStatus === "pending" && !currentTrackHasCoverArt(t),
+      ).length,
     [tracks],
   );
   const currentCoverCount = useMemo(() => {
@@ -213,6 +319,10 @@ export default function App() {
     }
   }, [current?.path, current?.candidateIndex, currentCoverCount, settings.matching.verboseLogs]);
   const allDone = tracks.length > 0 && pendingCount === 0;
+  const canReviewGoBack =
+    phase === "review" &&
+    reviewNavRev >= 0 &&
+    reviewNavStackRef.current.length > 0;
   const hasActiveWork =
     tracks.length > 0 ||
     acceptedPayloads.length > 0 ||
@@ -277,6 +387,18 @@ export default function App() {
         filenameStem: t.filenameStem,
       }));
       const runId = items.length > 0 ? ++lookupRunIdRef.current : lookupRunIdRef.current;
+      backgroundCoverPassLockRef.current = false;
+      reviewNavStackRef.current = [];
+      setReviewNavRev((v) => v + 1);
+      setResumeReviewPath(null);
+      coverAutoSearchAttemptedRef.current.clear();
+      coverAutoSearchDeclinedRef.current.clear();
+      setBackgroundCoverLookup({
+        active: false,
+        done: 0,
+        total: 0,
+        workingOnCurrentFile: false,
+      });
       setTracks(review);
       setAcceptedPayloads([]);
       setApplyOutcomes(null);
@@ -322,6 +444,10 @@ export default function App() {
     if (!folder || tracks.length === 0 || longTask) return;
     setError(null);
     clearProgress();
+    coverAutoSearchAttemptedRef.current.clear();
+    reviewNavStackRef.current = [];
+    setReviewNavRev((v) => v + 1);
+    setResumeReviewPath(null);
     const items = tracks.map((t) => ({
       path: t.path,
       artist: t.cleaned.searchArtist,
@@ -379,43 +505,191 @@ export default function App() {
     working,
   });
 
-  // When switching candidates, some matches may not have full cover options yet.
-  // Auto-refresh covers for the selected match using its artist/title.
-  const coverRerunKeyRef = useRef<{ path: string; key: string } | null>(null);
-  useEffect(() => {
+  const handleSearchNewCovers = useCallback(() => {
     if (!current) return;
-    if (singleLookupPath === current.path) return; // already refreshing this track
-
-    const c = current.candidates[current.candidateIndex];
-    if (!c) return;
-
-    const coverCount = c.coverOptions?.length ?? 0;
-    const needRefresh = coverCount < 4 || !c.coverUrl;
-    if (!needRefresh) return;
-
-    const key = `${c.artist}|||${c.title}`;
-    if (coverRerunKeyRef.current?.path === current.path) {
-      if (coverRerunKeyRef.current.key === key) return; // already tried for this match
-    }
-
-    coverRerunKeyRef.current = { path: current.path, key };
-    if (settings.matching.verboseLogs) {
-      console.debug("[candidate-cover-refresh]", {
-        path: current.path,
-        candidateIndex: current.candidateIndex,
-        coverCount,
-        artist: c.artist,
-        title: c.title,
-      });
-    }
-    void rerunSingleLookup(current.path, c.artist, c.title, current.filenameStem);
+    coverAutoSearchDeclinedRef.current.delete(
+      `${current.path}:${current.candidateIndex}`,
+    );
+    setWorking((w) => (w ? { ...w, explicitlyNoCover: false } : w));
+    const artist = working?.artist?.trim() || current.cleaned.searchArtist;
+    const title = working?.title?.trim() || current.cleaned.searchTitle;
+    void rerunSingleLookup(current.path, artist, title, current.filenameStem);
   }, [
     current,
-    current?.path,
-    current?.candidateIndex,
+    working?.artist,
+    working?.title,
+    rerunSingleLookup,
+  ]);
+
+  const handleDeclineAutoCoverSearch = useCallback(
+    (path: string, candidateIndex: number) => {
+      coverAutoSearchDeclinedRef.current.add(`${path}:${candidateIndex}`);
+    },
+    [],
+  );
+
+  const runBackgroundCoverPass = useCallback(async () => {
+    if (backgroundCoverPassLockRef.current) return;
+    if (
+      viewRef.current !== "autotag" ||
+      phaseRef.current !== "review" ||
+      longTaskRef.current ||
+      lookupProgressActiveRef.current
+    ) {
+      return;
+    }
+
+    const pickNext = (): ReviewTrack | null => {
+      for (const t of tracksRef.current) {
+        if (t.reviewStatus !== "pending") continue;
+        if (currentTrackHasCoverArt(t)) continue;
+        const key = `${t.path}:${t.candidateIndex}`;
+        if (coverAutoSearchDeclinedRef.current.has(key)) continue;
+        if (coverAutoSearchAttemptedRef.current.has(key)) continue;
+        return t;
+      }
+      return null;
+    };
+
+    if (!pickNext()) return;
+
+    const runId = lookupRunIdRef.current;
+    const estimateTotal = tracksRef.current.filter((t) => {
+      if (t.reviewStatus !== "pending") return false;
+      if (currentTrackHasCoverArt(t)) return false;
+      const key = `${t.path}:${t.candidateIndex}`;
+      if (coverAutoSearchDeclinedRef.current.has(key)) return false;
+      if (coverAutoSearchAttemptedRef.current.has(key)) return false;
+      return true;
+    }).length;
+
+    backgroundCoverPassLockRef.current = true;
+    let done = 0;
+
+    setBackgroundCoverLookup({
+      active: true,
+      done: 0,
+      total: Math.max(estimateTotal, 1),
+      workingOnCurrentFile: false,
+    });
+
+    try {
+      while (true) {
+        if (lookupRunIdRef.current !== runId) break;
+        if (lookupProgressActiveRef.current) break;
+        if (viewRef.current !== "autotag" || phaseRef.current !== "review") break;
+        if (longTaskRef.current) break;
+
+        while (singleLookupPathRef.current) {
+          await new Promise((r) => setTimeout(r, 120));
+          if (lookupRunIdRef.current !== runId) break;
+        }
+        if (lookupRunIdRef.current !== runId) break;
+
+        const next = pickNext();
+        if (!next) break;
+
+        const key = `${next.path}:${next.candidateIndex}`;
+        coverAutoSearchAttemptedRef.current.add(key);
+
+        const p = proposedFromTrack(next);
+        const artist = p.artist?.trim() || next.cleaned.searchArtist;
+        const title = p.title?.trim() || next.cleaned.searchTitle;
+
+        const pendingFront = tracksRef.current.find((t) => t.reviewStatus === "pending");
+        const spinHere = Boolean(pendingFront && pendingFront.path === next.path);
+        if (spinHere) {
+          setBackgroundCoverLookup((prev) => ({
+            ...prev,
+            workingOnCurrentFile: true,
+          }));
+        }
+
+        try {
+          const one = await batchLookup(
+            [
+              {
+                path: next.path,
+                artist,
+                title,
+                filenameStem: next.filenameStem,
+              },
+            ],
+            settingsMatchingRef.current,
+            runId,
+          );
+          if (lookupRunIdRef.current === runId) {
+            mergeLookupResults(one);
+          }
+        } catch (e) {
+          setError(String(e));
+        }
+
+        done += 1;
+        setBackgroundCoverLookup((prev) => ({
+          ...prev,
+          active: true,
+          done,
+          workingOnCurrentFile: false,
+        }));
+      }
+    } finally {
+      backgroundCoverPassLockRef.current = false;
+      setBackgroundCoverLookup({
+        active: false,
+        done: 0,
+        total: 0,
+        workingOnCurrentFile: false,
+      });
+    }
+  }, [mergeLookupResults]);
+
+  useEffect(() => {
+    if (view !== "autotag" || phase !== "review" || longTask) return;
+    if (lookupProgress.active) return;
+    if (pendingMissingCoverCount === 0) return;
+
+    const id = window.setTimeout(() => {
+      void runBackgroundCoverPass();
+    }, 400);
+
+    return () => window.clearTimeout(id);
+  }, [
+    view,
+    phase,
+    longTask,
+    lookupProgress.active,
+    pendingMissingCoverCount,
+    singleLookupPath,
+    runBackgroundCoverPass,
+  ]);
+
+  useEffect(() => {
+    if (view !== "autotag" || phase !== "review") return;
+    if (!current) return;
+    if (longTask) return;
+    if (lookupProgress.active) return;
+    if (backgroundCoverPassLockRef.current) return;
+    if (singleLookupPath) return;
+    if (currentTrackHasCoverArt(current)) return;
+
+    const key = `${current.path}:${current.candidateIndex}`;
+    if (coverAutoSearchDeclinedRef.current.has(key)) return;
+    if (coverAutoSearchAttemptedRef.current.has(key)) return;
+
+    coverAutoSearchAttemptedRef.current.add(key);
+    const p = proposedFromTrack(current);
+    const artist = p.artist?.trim() || current.cleaned.searchArtist;
+    const title = p.title?.trim() || current.cleaned.searchTitle;
+    void rerunSingleLookup(current.path, artist, title, current.filenameStem);
+  }, [
+    view,
+    phase,
+    current,
+    longTask,
+    lookupProgress.active,
     singleLookupPath,
     rerunSingleLookup,
-    settings.matching.verboseLogs,
   ]);
 
   const handleSwapArtistTitle = useCallback(() => {
@@ -429,6 +703,61 @@ export default function App() {
     });
   }, []);
 
+  const handleGoBackReview = useCallback(() => {
+    if (longTask) return;
+    const stack = reviewNavStackRef.current;
+    if (stack.length === 0) return;
+    const last = stack.pop()!;
+    setReviewNavRev((v) => v + 1);
+
+    const scrollY = readDocumentScrollY();
+
+    if (last.kind === "skip") {
+      setTracks((ts) =>
+        ts.map((t) =>
+          t.path === last.path ? { ...t, reviewStatus: "pending" as const } : t,
+        ),
+      );
+      setResumeReviewPath(last.path);
+      workingTrackKeyRef.current = null;
+      scheduleScrollAndReviewFocusRestore(scrollY, () =>
+        reviewDeckAnchorRef.current,
+      );
+      return;
+    }
+
+    const trBefore = tracksRef.current.find((t) => t.path === last.path);
+    const prev = acceptedPayloadsRef.current;
+    let idx = -1;
+    for (let i = prev.length - 1; i >= 0; i--) {
+      if (prev[i].path === last.path) {
+        idx = i;
+        break;
+      }
+    }
+    const removed = idx >= 0 ? prev[idx] : null;
+    if (idx >= 0) {
+      setAcceptedPayloads((p) => p.filter((_, i) => i !== idx));
+    }
+
+    if (removed && trBefore) {
+      workingTrackKeyRef.current = `${last.path}:${trBefore.candidateIndex}`;
+      setWorking(proposedFromApplyPayload(removed));
+    } else {
+      workingTrackKeyRef.current = null;
+    }
+
+    setTracks((ts) =>
+      ts.map((t) =>
+        t.path === last.path ? { ...t, reviewStatus: "pending" as const } : t,
+      ),
+    );
+    setResumeReviewPath(last.path);
+    scheduleScrollAndReviewFocusRestore(scrollY, () =>
+      reviewDeckAnchorRef.current,
+    );
+  }, [longTask]);
+
   const handleAccept = useCallback(() => {
     if (!current || !working) return;
     if (!working.artist.trim() || !working.title.trim()) {
@@ -437,6 +766,10 @@ export default function App() {
       );
       return;
     }
+    reviewNavStackRef.current.push({ kind: "accept", path: current.path });
+    setReviewNavRev((v) => v + 1);
+    setResumeReviewPath(null);
+    const scrollY = readDocumentScrollY();
     setError(null);
     const part = buildApplyPart(current.path, working);
     setAcceptedPayloads((a) => [...a, part]);
@@ -445,16 +778,38 @@ export default function App() {
         t.path === current.path ? { ...t, reviewStatus: "accepted" } : t,
       ),
     );
+    scheduleScrollAndReviewFocusRestore(scrollY, () =>
+      reviewDeckAnchorRef.current,
+    );
   }, [current, working]);
 
   const handleSkip = useCallback(() => {
+    const pending = tracksRef.current.filter(
+      (t) => t.reviewStatus === "pending",
+    );
+    if (pending.length === 0) return;
+    const rp = resumeReviewPathRef.current;
+    const curTrack =
+      rp != null
+        ? pending.find((t) => t.path === rp) ?? pending[0]
+        : pending[0];
+    const curPath = curTrack.path;
+    reviewNavStackRef.current.push({ kind: "skip", path: curPath });
+    setReviewNavRev((v) => v + 1);
+    setResumeReviewPath(null);
+    const scrollY = readDocumentScrollY();
     setTracks((ts) => {
-      const curPath = ts.find((t) => t.reviewStatus === "pending")?.path;
-      if (!curPath) return ts;
+      const still = ts.find(
+        (t) => t.path === curPath && t.reviewStatus === "pending",
+      );
+      if (!still) return ts;
       return ts.map((t) =>
-        t.path === curPath ? { ...t, reviewStatus: "skipped" } : t,
+        t.path === curPath ? { ...t, reviewStatus: "skipped" as const } : t,
       );
     });
+    scheduleScrollAndReviewFocusRestore(scrollY, () =>
+      reviewDeckAnchorRef.current,
+    );
   }, []);
 
   const runApply = async () => {
@@ -509,6 +864,19 @@ export default function App() {
 
   const resetImport = () => {
     lookupRunIdRef.current += 1;
+    backgroundCoverPassLockRef.current = false;
+    reviewNavStackRef.current = [];
+    setReviewNavRev((v) => v + 1);
+    setResumeReviewPath(null);
+    coverAutoSearchAttemptedRef.current.clear();
+    coverAutoSearchDeclinedRef.current.clear();
+    setBackgroundCoverLookup({
+      active: false,
+      done: 0,
+      total: 0,
+      workingOnCurrentFile: false,
+    });
+    workingTrackKeyRef.current = null;
     setLookupProgress({ active: false, done: 0, total: 0 });
     setLookupCurrentPath(null);
     clearProgress();
@@ -539,9 +907,37 @@ export default function App() {
     if (!current) return null;
     const currentCandidate = current.candidates[current.candidateIndex];
     const currentCoverCount = currentCandidate?.coverOptions?.length ?? 0;
-    const coverSearchActive = lookupProgress.active || singleLookupPath === current.path;
+    const coverSearchActive =
+      lookupProgress.active ||
+      singleLookupPath === current.path ||
+      (backgroundCoverLookup.active &&
+        backgroundCoverLookup.workingOnCurrentFile);
     return { currentCoverCount, coverSearchActive };
-  }, [current, lookupProgress.active, singleLookupPath]);
+  }, [
+    current,
+    lookupProgress.active,
+    singleLookupPath,
+    backgroundCoverLookup.active,
+    backgroundCoverLookup.workingOnCurrentFile,
+  ]);
+
+  // Move focus into the review region without scrolling; scroll position is
+  // restored explicitly in handleAccept / handleSkip (Tauri WebView scrolls
+  // to the first tabbable after the Accept button unmounts).
+  useLayoutEffect(() => {
+    if (view !== "autotag" || phase !== "review" || !current || allDone) return;
+    const anchor = reviewDeckAnchorRef.current;
+    if (!anchor) return;
+    const ae = document.activeElement;
+    if (
+      ae instanceof HTMLInputElement ||
+      ae instanceof HTMLTextAreaElement ||
+      ae instanceof HTMLSelectElement
+    ) {
+      if (anchor.contains(ae)) return;
+    }
+    anchor.focus({ preventScroll: true });
+  }, [current?.path, view, phase, allDone]);
 
   return (
     <div className="app-shell">
@@ -602,6 +998,7 @@ export default function App() {
           </div>
         </header>
 
+        <div className="app-body" ref={(el) => bindAppScrollContainer(el)}>
         <OptionsMenu
           open={settingsOpen}
           onClose={() => setSettingsOpen(false)}
@@ -710,7 +1107,7 @@ export default function App() {
         )}
 
         {view === "autotag" && phase === "review" && (
-          <>
+          <div className="autotag-review-workspace">
             <section className="toolbar">
               <div className="toolbar-inner">
                 <span className="stat stat-pill">
@@ -732,6 +1129,23 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                {backgroundCoverLookup.active && backgroundCoverLookup.total > 0 && (
+                  <div className="lookup-progress lookup-progress-bg" aria-live="polite">
+                    <span className="lookup-progress-label">Background cover search</span>
+                    <progress
+                      className="lookup-progress-bar"
+                      max={backgroundCoverLookup.total}
+                      value={Math.min(
+                        backgroundCoverLookup.done,
+                        backgroundCoverLookup.total,
+                      )}
+                    />
+                    <span className="lookup-progress-text">
+                      {Math.min(backgroundCoverLookup.done, backgroundCoverLookup.total)} /{" "}
+                      {backgroundCoverLookup.total}
+                    </span>
+                  </div>
+                )}
                 {coverProgressTotal > 0 && (
                   <div className="lookup-progress" aria-live="polite">
                     <span className="lookup-progress-label">Covers loaded</span>
@@ -747,12 +1161,23 @@ export default function App() {
                   </div>
                 )}
                 <div className="toolbar-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={handleGoBackReview}
+                    disabled={longTask || !canReviewGoBack}
+                    title="Restore the last track you accepted or skipped"
+                    aria-label="Go back to previous track"
+                  >
+                    Back
+                  </button>
                   <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
                     Re-run lookup
                   </button>
                   <button
                     type="button"
                     className="btn btn-secondary"
+                    data-no-review-refocus
                     onClick={() => setSettingsOpen(true)}
                   >
                     Options
@@ -766,7 +1191,9 @@ export default function App() {
               )}
             </section>
 
-            {error && <div className="banner error">{error}</div>}
+            <div className="banner-slot" aria-live="polite">
+              {error && <div className="banner error">{error}</div>}
+            </div>
 
             <details className="file-details">
               <summary>All files ({tracks.length})</summary>
@@ -819,24 +1246,33 @@ export default function App() {
             )}
 
             {current && working && !allDone && currentReviewData && (
-              <ReviewDeck
-                track={current}
-                proposed={working}
-                coverSearchActive={currentReviewData.coverSearchActive}
-                coverSearchCount={currentReviewData.currentCoverCount}
-                coverSearchTotal={4}
-                onProposedChange={setWorking}
-                onPrevCandidate={() => bumpCandidate(-1)}
-                onNextCandidate={() => bumpCandidate(1)}
-                onAccept={handleAccept}
-                onSkip={handleSkip}
-                onGuessArtist={handleGuessArtist}
-                onSwapArtistTitle={handleSwapArtistTitle}
-                onMusicbrainzLookup={handleMusicbrainzLookup}
-                rename={settings.rename}
-              />
+              <div
+                ref={reviewDeckAnchorRef}
+                tabIndex={-1}
+                className="review-deck-anchor"
+                aria-label="Current track review"
+              >
+                <ReviewDeck
+                  track={current}
+                  proposed={working}
+                  coverSearchActive={currentReviewData.coverSearchActive}
+                  coverSearchCount={currentReviewData.currentCoverCount}
+                  coverSearchTotal={4}
+                  onProposedChange={setWorking}
+                  onPrevCandidate={() => bumpCandidate(-1)}
+                  onNextCandidate={() => bumpCandidate(1)}
+                  onAccept={handleAccept}
+                  onSkip={handleSkip}
+                  onGuessArtist={handleGuessArtist}
+                  onSwapArtistTitle={handleSwapArtistTitle}
+                  onMusicbrainzLookup={handleMusicbrainzLookup}
+                  onSearchNewCovers={handleSearchNewCovers}
+                  onDeclineAutoCoverSearch={handleDeclineAutoCoverSearch}
+                  rename={settings.rename}
+                />
+              </div>
             )}
-          </>
+          </div>
         )}
 
         {view === "autotag" && phase === "apply_done" && applyOutcomes && (
@@ -867,6 +1303,7 @@ export default function App() {
             </button>
           </section>
         )}
+        </div>
       </div>
     </div>
   );

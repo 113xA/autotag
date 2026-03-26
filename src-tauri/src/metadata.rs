@@ -1,12 +1,51 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::id3::v2::PopularimeterFrame;
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::read_from_path;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagItem};
+use regex::Regex;
+use std::sync::OnceLock;
 
 use crate::models::{RekordboxApplyPayload, RekordboxWriteOptions, TagSnapshot};
 use crate::options::RenameOptions;
+
+fn best_embedded_cover_picture<'a>(tag: &'a Tag) -> Option<&'a Picture> {
+    tag.get_picture_type(PictureType::CoverFront)
+        .or_else(|| tag.pictures().first())
+        .filter(|p| !p.data().is_empty())
+}
+
+/// Bytes + optional MIME hint (`image/jpeg`, etc.) for embedded front cover.
+pub fn read_embedded_cover_bytes(path: &str) -> Option<(Vec<u8>, Option<String>)> {
+    let tagged = read_from_path(path).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let pic = best_embedded_cover_picture(tag)?;
+    let bytes = pic.data().to_vec();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mime_hint = pic
+        .mime_type()
+        .map(|m| m.as_str().to_string());
+    Some((bytes, mime_hint))
+}
+
+/// `data:image/...;base64,...` for UI preview (capped size).
+pub fn embedded_cover_data_url(path: &str) -> Option<String> {
+    const MAX_RAW_BYTES: usize = 2_000_000;
+    let (bytes, mime_hint) = read_embedded_cover_bytes(path)?;
+    if bytes.len() > MAX_RAW_BYTES {
+        return None;
+    }
+    let mime = mime_hint
+        .as_deref()
+        .filter(|s| s.starts_with("image/"))
+        .unwrap_or("image/jpeg");
+    let b64 = STANDARD.encode(&bytes);
+    Some(format!("data:{mime};base64,{b64}"))
+}
 
 pub fn read_tag_snapshot(path: &str) -> TagSnapshot {
     let Ok(tagged) = read_from_path(path) else {
@@ -15,6 +54,7 @@ pub fn read_tag_snapshot(path: &str) -> TagSnapshot {
     let Some(tag) = tagged.primary_tag().or_else(|| tagged.first_tag()) else {
         return TagSnapshot::default();
     };
+    let has_embedded_cover = best_embedded_cover_picture(tag).is_some();
     TagSnapshot {
         artist: tag.artist().map(|s| s.to_string()),
         title: tag.title().map(|s| s.to_string()),
@@ -24,6 +64,7 @@ pub fn read_tag_snapshot(path: &str) -> TagSnapshot {
             .map(|s| s.to_string()),
         track_number: tag.track(),
         year: tag.year(),
+        has_embedded_cover,
     }
 }
 
@@ -136,6 +177,51 @@ pub fn sanitize_path_component(s: &str) -> String {
         .collect()
 }
 
+/// Remove parentheticals / bracketed tags and common version words from text used
+/// in **rename stems only** (tags on disk stay unchanged). Year is appended later
+/// by rename options, not taken from these strings.
+fn strip_rename_segment_for_filename(s: &str) -> String {
+    static ROUND: OnceLock<Regex> = OnceLock::new();
+    static SQUARE: OnceLock<Regex> = OnceLock::new();
+    static CURLY: OnceLock<Regex> = OnceLock::new();
+    static PHRASES: OnceLock<Regex> = OnceLock::new();
+    static WORDS: OnceLock<Regex> = OnceLock::new();
+
+    let round = ROUND.get_or_init(|| Regex::new(r"\([^)]*\)").unwrap());
+    let square = SQUARE.get_or_init(|| Regex::new(r"\[[^\]]*\]").unwrap());
+    let curly = CURLY.get_or_init(|| Regex::new(r"\{[^{}]*\}").unwrap());
+    let phrases = PHRASES.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(original\s+mix|extended\s+mix|radio\s+edit|club\s+mix|vocal\s+mix|dub\s+mix|vip\s+mix)\b",
+        )
+        .unwrap()
+    });
+    let words = WORDS.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(original|extended|mixed|mix|remix|edit|vip|bootleg|mashup|instrumental|dub|clean|dirty|explicit|acoustic|version)\b",
+        )
+        .unwrap()
+    });
+
+    let mut t = s.to_string();
+    for _ in 0..64 {
+        let before = t.clone();
+        t = round.replace_all(&t, " ").into_owned();
+        t = square.replace_all(&t, " ").into_owned();
+        t = curly.replace_all(&t, " ").into_owned();
+        t = phrases.replace_all(&t, " ").into_owned();
+        t = words.replace_all(&t, " ").into_owned();
+        t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t == before {
+            break;
+        }
+    }
+    t.trim()
+        .trim_matches(|c: char| matches!(c, '-' | '–' | '—' | '_' | '·' | '.'))
+        .trim()
+        .to_string()
+}
+
 pub fn build_rename_path(
     original: &str,
     artist: &str,
@@ -155,13 +241,13 @@ pub fn build_rename_path(
     };
     let mut chunks: Vec<String> = Vec::new();
     if opts.include_artist {
-        let s = sanitize_path_component(artist);
+        let s = sanitize_path_component(&strip_rename_segment_for_filename(artist));
         if !s.is_empty() {
             chunks.push(s);
         }
     }
     if opts.include_title {
-        let s = sanitize_path_component(title);
+        let s = sanitize_path_component(&strip_rename_segment_for_filename(title));
         if !s.is_empty() {
             chunks.push(s);
         }
@@ -170,7 +256,7 @@ pub fn build_rename_path(
         chunks.swap(0, 1);
     }
     if opts.include_album {
-        let s = sanitize_path_component(album);
+        let s = sanitize_path_component(&strip_rename_segment_for_filename(album));
         if !s.is_empty() {
             chunks.push(s);
         }
@@ -375,4 +461,56 @@ pub fn write_rekordbox_tags(
     tagged
         .save_to_path(path, WriteOptions::default())
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod rename_strip_tests {
+    use super::*;
+
+    #[test]
+    fn strips_parens_brackets_curly_and_noise_words() {
+        assert_eq!(
+            strip_rename_segment_for_filename("Track (Extended Mix)"),
+            "Track"
+        );
+        assert_eq!(
+            strip_rename_segment_for_filename("Song [Original] (VIP)"),
+            "Song"
+        );
+        assert_eq!(
+            strip_rename_segment_for_filename("{Radio Edit} Hello"),
+            "Hello"
+        );
+        assert_eq!(
+            strip_rename_segment_for_filename("Artist - Original Mix"),
+            "Artist"
+        );
+    }
+
+    #[test]
+    fn preview_rename_applies_strip_to_stem() {
+        let opts = RenameOptions {
+            enabled: true,
+            include_artist: true,
+            include_title: true,
+            include_album: false,
+            include_year: false,
+            separator: "dashSpaced".into(),
+            part_order: "artistFirst".into(),
+        };
+        let name = preview_rename_filename(
+            r"C:\m\file.mp3",
+            "DJ X",
+            "Banger (Extended Mix)",
+            "",
+            None,
+            &opts,
+        )
+        .expect("preview");
+        assert!(name.starts_with("DJ X") && name.contains("Banger"), "{name}");
+        assert!(
+            !name.to_lowercase().contains("extended"),
+            "unexpected extended in {name}"
+        );
+    }
 }

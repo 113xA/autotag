@@ -75,6 +75,9 @@ pub struct TagSnapshot {
     pub album_artist: Option<String>,
     pub track_number: Option<u32>,
     pub year: Option<u32>,
+    /// True when the file already has embedded front (or first) cover art.
+    #[serde(default)]
+    pub has_embedded_cover: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +166,9 @@ pub struct ApplyPayload {
     pub cover_url: Option<String>,
     /// MusicBrainz release MBID for Cover Art Archive JSON fallback.
     pub release_mbid: Option<String>,
+    /// User chose "None (remove cover)" — strip embedded art; do not reuse file cover.
+    #[serde(default)]
+    pub remove_embedded_cover: bool,
 }
 
 #[derive(Debug, Serialize)]

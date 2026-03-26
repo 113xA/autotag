@@ -1,6 +1,6 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { memo, useEffect, useRef, useState } from "react";
-import { previewRename } from "../api/tauri";
+import { previewRename, readEmbeddedCoverPreview } from "../api/tauri";
 import type { RenameSettings } from "../options/types";
 import type { ProposedTags, ReviewTrack, TagSnapshot } from "../types";
 import { parseU32 } from "../utils/parse";
@@ -21,6 +21,10 @@ type Props = {
   onGuessArtist: (artist: string) => void;
   onSwapArtistTitle: () => void;
   onMusicbrainzLookup: () => void;
+  /** Multi-source cover search; also runs automatically when no art exists yet. */
+  onSearchNewCovers: () => void;
+  /** User chose no cover for this path/match — skip auto cover lookup for it. */
+  onDeclineAutoCoverSearch?: (path: string, candidateIndex: number) => void;
   rename: RenameSettings;
 };
 
@@ -82,6 +86,8 @@ function ReviewDeckInner({
   onGuessArtist,
   onSwapArtistTitle,
   onMusicbrainzLookup,
+  onSearchNewCovers,
+  onDeclineAutoCoverSearch,
   rename,
 }: Props) {
   const x = useMotionValue(0);
@@ -91,13 +97,25 @@ function ReviewDeckInner({
 
   const [newNamePreview, setNewNamePreview] = useState<string | null>(null);
   const [coverFailed, setCoverFailed] = useState(false);
+  const [embeddedPreviewUrl, setEmbeddedPreviewUrl] = useState<string | null>(
+    null,
+  );
+  const userChoseNoCoverRef = useRef(false);
 
   useEffect(() => {
     x.set(0);
   }, [track.path, track.candidateIndex, x]);
 
   useEffect(() => {
+    userChoseNoCoverRef.current = false;
+  }, [track.path, track.candidateIndex]);
+
+  useEffect(() => {
     setCoverFailed(false);
+  }, [proposed.coverUrl]);
+
+  useEffect(() => {
+    if (proposed.coverUrl?.trim()) userChoseNoCoverRef.current = false;
   }, [proposed.coverUrl]);
 
   const renamePreviewDebounceRef = useRef<number | null>(null);
@@ -167,6 +185,37 @@ function ReviewDeckInner({
   const currentName = track.fileName || basename(track.path);
   const currentCandidate = track.candidates[track.candidateIndex];
   const coverOptions = currentCandidate?.coverOptions ?? [];
+
+  useEffect(() => {
+    if (!track.current.hasEmbeddedCover || proposed.explicitlyNoCover) {
+      setEmbeddedPreviewUrl(null);
+      return;
+    }
+    if (
+      proposed.coverUrl?.trim() ||
+      currentCandidate?.coverUrl?.trim() ||
+      coverOptions.length > 0
+    ) {
+      setEmbeddedPreviewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void readEmbeddedCoverPreview(track.path).then((url) => {
+      if (!cancelled) setEmbeddedPreviewUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    track.path,
+    track.candidateIndex,
+    proposed.coverUrl,
+    proposed.explicitlyNoCover,
+    track.current.hasEmbeddedCover,
+    currentCandidate?.coverUrl,
+    coverOptions.length,
+  ]);
+
   const albumSuggestions = Array.from(
     new Set(
       track.candidates
@@ -182,10 +231,31 @@ function ReviewDeckInner({
     ),
   ).slice(0, 6);
 
+  // Keep showing existing art: proposed URL, embedded file art, else candidate / options,
+  // unless the user explicitly chose "None (remove cover)" for this track/match.
+  const heroCoverUrl =
+    proposed.explicitlyNoCover || userChoseNoCoverRef.current
+      ? null
+      : proposed.coverUrl?.trim()
+        ? proposed.coverUrl
+        : embeddedPreviewUrl?.trim()
+          ? embeddedPreviewUrl
+          : currentCandidate?.coverUrl?.trim() ||
+            coverOptions[0]?.url ||
+            null;
   const coverSrc =
-    !proposed.coverUrl || coverFailed
-      ? PLACEHOLDER_COVER
-      : proposed.coverUrl;
+    !heroCoverUrl || coverFailed ? PLACEHOLDER_COVER : heroCoverUrl;
+
+  const hasAnyCoverArt =
+    Boolean(proposed.coverUrl?.trim()) ||
+    Boolean(embeddedPreviewUrl?.trim()) ||
+    Boolean(
+      track.current.hasEmbeddedCover &&
+        !proposed.explicitlyNoCover &&
+        !userChoseNoCoverRef.current,
+    ) ||
+    Boolean(currentCandidate?.coverUrl?.trim()) ||
+    coverOptions.length > 0;
 
   async function handleDragEnd(_: unknown, info: { offset: { x: number } }) {
     const dx = info.offset.x;
@@ -284,11 +354,32 @@ function ReviewDeckInner({
           </div>
           <div className="cover-options-block">
             <div className="cover-options-title">Cover proposals</div>
-            <div className="row" style={{ marginTop: "0.15rem", marginBottom: "0.35rem" }}>
+            <p className="cover-options-hint">
+              If this match has no art yet, extra sources are searched automatically.
+              Use the button below to search again anytime.
+            </p>
+            <div className="row cover-actions-row">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onSearchNewCovers}
+                disabled={coverSearchActive}
+                title="Look up more cover art from your enabled sources"
+              >
+                {hasAnyCoverArt ? "Search new covers" : "Search for covers"}
+              </button>
               <button
                 type="button"
                 className={`btn btn-secondary ${proposed.coverUrl ? "" : "selected"}`}
-                onClick={() => onProposedChange({ ...proposed, coverUrl: null })}
+                onClick={() => {
+                  userChoseNoCoverRef.current = true;
+                  onDeclineAutoCoverSearch?.(track.path, track.candidateIndex);
+                  onProposedChange({
+                    ...proposed,
+                    coverUrl: null,
+                    explicitlyNoCover: true,
+                  });
+                }}
                 title="Use no cover for this track"
               >
                 None (remove cover)
@@ -303,7 +394,13 @@ function ReviewDeckInner({
                       key={`${opt.source}-${opt.url}`}
                       type="button"
                       className={`cover-option-tile ${selected ? "selected" : ""}`}
-                      onClick={() => onProposedChange({ ...proposed, coverUrl: opt.url })}
+                      onClick={() =>
+                        onProposedChange({
+                          ...proposed,
+                          coverUrl: opt.url,
+                          explicitlyNoCover: false,
+                        })
+                      }
                       title={`${opt.source}${opt.score != null ? ` (${(opt.score * 100).toFixed(0)}%)` : ""}`}
                     >
                       <img src={opt.url} alt="" onError={() => undefined} />

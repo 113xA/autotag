@@ -25,8 +25,8 @@ use walkdir::WalkDir;
 use crate::cover_art::{placeholder_cover_png_bytes, resolve_cover_art, CoverResolveParams};
 use crate::filename_clean::clean_filename_stem;
 use crate::metadata::{
-    build_rename_path, preview_rename_filename, read_tag_snapshot, sanitize_path_component,
-    unique_available_path, write_rekordbox_tags,
+    build_rename_path, embedded_cover_data_url, preview_rename_filename, read_embedded_cover_bytes,
+    read_tag_snapshot, sanitize_path_component, unique_available_path, write_rekordbox_tags,
     write_tags, WriteTagInput,
 };
 use crate::models::{
@@ -577,34 +577,56 @@ async fn apply_rekordbox_batch(
     Ok(outcomes)
 }
 
+#[tauri::command]
+async fn read_embedded_cover_preview(path: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || embedded_cover_data_url(&path))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn apply_one(
     client: &reqwest::Client,
     payload: ApplyPayload,
     meta: &ApplyMetadataOptions,
     rename: &RenameOptions,
 ) -> Result<(), String> {
+    let path_for_embedded = payload.path.clone();
     let (cover_bytes, mime_hint): (Option<Vec<u8>>, Option<String>) = if meta.embed_cover {
-        let resolved = resolve_cover_art(
-            client,
-            CoverResolveParams {
-                primary_url: payload.cover_url.as_deref(),
-                release_mbid: payload.release_mbid.as_deref(),
-                artist: &payload.artist,
-                title: &payload.title,
-                album: &payload.album,
-                try_itunes_fallback: meta.try_itunes_cover_fallback,
-            },
-        )
-        .await;
-        if let Some((b, m)) = resolved {
-            (Some(b), m)
-        } else if meta.embed_placeholder_when_no_art {
-            (
-                Some(placeholder_cover_png_bytes().to_vec()),
-                Some("image/png".into()),
-            )
-        } else {
+        if payload.remove_embedded_cover {
             (None, None)
+        } else {
+            let resolved = resolve_cover_art(
+                client,
+                CoverResolveParams {
+                    primary_url: payload.cover_url.as_deref(),
+                    release_mbid: payload.release_mbid.as_deref(),
+                    artist: &payload.artist,
+                    title: &payload.title,
+                    album: &payload.album,
+                    try_itunes_fallback: meta.try_itunes_cover_fallback,
+                },
+            )
+            .await;
+            if let Some((b, m)) = resolved {
+                (Some(b), m)
+            } else {
+                let embedded = tokio::task::spawn_blocking({
+                    let p = path_for_embedded.clone();
+                    move || read_embedded_cover_bytes(&p)
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+                if let Some((b, m)) = embedded {
+                    (Some(b), m)
+                } else if meta.embed_placeholder_when_no_art {
+                    (
+                        Some(placeholder_cover_png_bytes().to_vec()),
+                        Some("image/png".into()),
+                    )
+                } else {
+                    (None, None)
+                }
+            }
         }
     } else {
         (None, None)
@@ -681,6 +703,7 @@ pub fn run() {
             load_session_snapshot,
             clear_session_snapshot,
             musicbrainz_lookup_one,
+            read_embedded_cover_preview,
             match_rekordbox_library,
             apply_rekordbox_batch
         ])

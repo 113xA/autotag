@@ -26,6 +26,14 @@ export async function scanFolder(
   return invoke<ScannedTrack[]>("scan_folder", { path, cleaning });
 }
 
+/** Data URL for embedded front cover, or null if none / too large. */
+export async function readEmbeddedCoverPreview(
+  path: string,
+): Promise<string | null> {
+  const v = await invoke<string | null>("read_embedded_cover_preview", { path });
+  return v;
+}
+
 export type LookupBatchItem = {
   path: string;
   artist: string;
@@ -154,6 +162,7 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
       year: c.year != null ? String(c.year) : currentYear,
       coverUrl: c.coverUrl,
       releaseMbid: c.releaseMbid?.trim() || null,
+      explicitlyNoCover: false,
     };
   }
   return {
@@ -165,5 +174,6 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
     year: currentYear,
     coverUrl: null,
     releaseMbid: null,
+    explicitlyNoCover: false,
   };
 }
