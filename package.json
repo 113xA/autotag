@@ -2,6 +2,20 @@
   "name": "library-autotag",
   "private": true,
   "version": "0.1.0",
+  "description": "Desktop music library autotag tool with multi-source lookup, cover proposals, and review/apply workflow.",
+  "homepage": "https://github.com/113xA/autotag",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/113xA/autotag.git"
+  },
+  "keywords": [
+    "tauri",
+    "react",
+    "music",
+    "autotag",
+    "id3",
+    "rekordbox"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
