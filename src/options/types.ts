@@ -58,6 +58,7 @@ export type AppSettings = {
   matching: MatchingOptions;
   applyMeta: ApplyMetadataOptions;
   autoLookupOnImport: boolean;
+  autoApplyOnComplete: boolean;
   rename: RenameSettings;
   spotifyClientId: string | null;
   spotifyClientSecret: string | null;

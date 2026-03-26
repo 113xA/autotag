@@ -887,6 +887,16 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                       />
                       When embed cover is on but nothing is found, embed a placeholder image
                     </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={s.autoApplyOnComplete}
+                        onChange={(e) =>
+                          onChange({ ...s, autoApplyOnComplete: e.target.checked })
+                        }
+                      />
+                      Auto-apply when all tracks have been reviewed (skips confirmation)
+                    </label>
                   </div>
                   <label className="field">
                     <span>Genre</span>
@@ -1075,7 +1085,7 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                           })
                         }
                       >
-                        <option value="dashSpaced">Space – space ( - )</option>
+                        <option value="dashSpaced">Space - space ( - )</option>
                         <option value="dashTight">Hyphen (-)</option>
                         <option value="underscore">Underscore (_)</option>
                         <option value="dot">Middle dot (·)</option>

@@ -140,7 +140,7 @@ function renameConfirmHint(rename: RenameSettings): string {
         ? "·"
         : rename.separator === "dashTight"
           ? "-"
-          : "–";
+          : "-";
   const order =
     rename.partOrder === "titleFirst" ? "title first" : "artist first";
   return ` (${bits.join(` ${sep} `)}; ${order})`;
@@ -833,7 +833,7 @@ export default function App() {
     );
   }, []);
 
-  const runApply = async () => {
+  const runApply = async (skipConfirm = false) => {
     if (acceptedPayloads.length === 0) return;
     const meta = {
       ...settings.applyMeta,
@@ -841,27 +841,21 @@ export default function App() {
       grouping: settings.applyMeta.grouping?.trim() || null,
       comment: settings.applyMeta.comment?.trim() || null,
     };
-    if (!meta.writeTags && !settings.rename.enabled) {
-      setError("Enable “Write tags” and/or “Rename files on apply” in settings.");
-      return;
-    }
-    const n = acceptedPayloads.length;
-    const willTag = meta.writeTags;
-    const willRename = settings.rename.enabled;
-    const actions: string[] = [];
-    if (willTag) actions.push("write embedded tags (and cover if enabled)");
-    if (willRename) {
-      actions.push(
-        `rename files on disk${renameConfirmHint(settings.rename)}`,
+    const metaForApply = { ...meta, writeTags: true };
+    const renameForApply = { ...settings.rename, enabled: true };
+
+    if (!skipConfirm) {
+      const n = acceptedPayloads.length;
+      const summary =
+        `write embedded tags (and cover if enabled) and ` +
+        `rename files on disk${renameConfirmHint(renameForApply)}`;
+      const ok = window.confirm(
+        `You are about to permanently change ${n} file${n === 1 ? "" : "s"}.\n\n` +
+          `This will ${summary}.\n\n` +
+          "There is no automatic undo. Continue?",
       );
+      if (!ok) return;
     }
-    const summary = actions.join(" and ");
-    const ok = window.confirm(
-      `You are about to permanently change ${n} file${n === 1 ? "" : "s"}.\n\n` +
-        `This will ${summary}.\n\n` +
-        "There is no automatic undo. Continue?",
-    );
-    if (!ok) return;
 
     clearProgress();
     setLongTask(true);
@@ -869,8 +863,8 @@ export default function App() {
     try {
       const outcomes = await applyBatch(
         acceptedPayloads,
-        meta,
-        settings.rename,
+        metaForApply,
+        renameForApply,
       );
       setApplyOutcomes(outcomes);
       setPhase("apply_done");
@@ -882,6 +876,18 @@ export default function App() {
       setLongTask(false);
     }
   };
+
+  useEffect(() => {
+    if (
+      settings.autoApplyOnComplete &&
+      allDone &&
+      phase === "review" &&
+      acceptedPayloads.length > 0 &&
+      !longTask
+    ) {
+      void runApply(true);
+    }
+  }, [allDone, settings.autoApplyOnComplete, phase, acceptedPayloads.length, longTask]);
 
   const resetImport = () => {
     lookupRunIdRef.current += 1;
@@ -1208,7 +1214,7 @@ export default function App() {
                   <button
                     type="button"
                     className="btn primary"
-                    onClick={runApply}
+                    onClick={() => runApply()}
                     disabled={acceptedPayloads.length === 0 || longTask}
                   >
                     Apply all accepted

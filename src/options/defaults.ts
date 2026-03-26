@@ -54,6 +54,7 @@ export const defaultAppSettings = (): AppSettings => ({
   matching: defaultMatching(),
   applyMeta: defaultApplyMeta(),
   autoLookupOnImport: true,
+  autoApplyOnComplete: false,
   rename: defaultRename(),
   spotifyClientId: null,
   spotifyClientSecret: null,
