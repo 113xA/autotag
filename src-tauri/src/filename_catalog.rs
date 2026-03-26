@@ -241,6 +241,13 @@ pub fn backfill_top_cover(candidates: &mut [crate::models::LookupCandidate], art
         .map_or(true, |u| u.trim().is_empty());
     if need {
         c.cover_url = Some(url.clone());
+        c.cover_options.push(crate::models::CoverOption {
+            url: url.clone(),
+            source: "itunes".to_string(),
+            width: Some(600),
+            height: Some(600),
+            score: None,
+        });
     }
 }
 
@@ -313,6 +320,7 @@ mod tests {
             track_number: None,
             year: None,
             cover_url: None,
+            cover_options: vec![],
             score: None,
         }];
         backfill_top_cover(&mut c, Some(&"https://art/600.jpg".into()));

@@ -15,6 +15,9 @@ type Props = {
   onNextCandidate: () => void;
   onAccept: () => void;
   onSkip: () => void;
+  onGuessArtist: (artist: string) => void;
+  onSwapArtistTitle: () => void;
+  onMusicbrainzLookup: () => void;
   rename: RenameSettings;
 };
 
@@ -70,6 +73,9 @@ export function ReviewDeck({
   onNextCandidate,
   onAccept,
   onSkip,
+  onGuessArtist,
+  onSwapArtistTitle,
+  onMusicbrainzLookup,
   rename,
 }: Props) {
   const x = useMotionValue(0);
@@ -129,6 +135,22 @@ export function ReviewDeck({
 
   const n = track.candidates.length;
   const currentName = track.fileName || basename(track.path);
+  const currentCandidate = track.candidates[track.candidateIndex];
+  const coverOptions = currentCandidate?.coverOptions ?? [];
+  const albumSuggestions = Array.from(
+    new Set(
+      track.candidates
+        .map((c) => c.album.trim())
+        .filter((a) => a.length > 0),
+    ),
+  ).slice(0, 6);
+  const yearSuggestions = Array.from(
+    new Set(
+      track.candidates
+        .map((c) => (c.year != null ? String(c.year) : ""))
+        .filter((y) => y.length > 0),
+    ),
+  ).slice(0, 6);
 
   const coverSrc =
     !proposed.coverUrl || coverFailed
@@ -191,6 +213,34 @@ export function ReviewDeck({
         </motion.div>
 
         <div className="file-rename-block">
+          <div className={`confidence-pill ${track.confidence}`}>
+            {track.confidence === "high"
+              ? "High confidence"
+              : track.confidence === "medium"
+                ? "Needs confirmation"
+                : "Manual check"}
+          </div>
+          {track.confidence === "medium" && track.artistGuesses.length > 0 && (
+            <div className="guess-chip-row">
+              {track.artistGuesses.slice(0, 4).map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  className="guess-chip"
+                  onClick={() => onGuessArtist(g)}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          )}
+          {track.confidence === "low" && (
+            <div className="row" style={{ marginTop: "0.4rem", marginBottom: "0.4rem" }}>
+              <button type="button" className="btn btn-secondary" onClick={onSwapArtistTitle}>
+                Swap artist/title
+              </button>
+            </div>
+          )}
           <div className="file-rename-label">File name</div>
           <div className="file-rename-row">
             <code className="mono name-old">{currentName}</code>
@@ -202,6 +252,33 @@ export function ReviewDeck({
             ) : (
               <span className="muted">Unchanged (enable rename in settings)</span>
             )}
+          </div>
+          {coverOptions.length > 0 && (
+            <div className="cover-options-block">
+              <div className="cover-options-title">Cover proposals</div>
+              <div className="cover-options-grid">
+                {coverOptions.slice(0, 4).map((opt) => {
+                  const selected = proposed.coverUrl === opt.url;
+                  return (
+                    <button
+                      key={`${opt.source}-${opt.url}`}
+                      type="button"
+                      className={`cover-option-tile ${selected ? "selected" : ""}`}
+                      onClick={() => onProposedChange({ ...proposed, coverUrl: opt.url })}
+                      title={`${opt.source}${opt.score != null ? ` (${(opt.score * 100).toFixed(0)}%)` : ""}`}
+                    >
+                      <img src={opt.url} alt="" onError={() => undefined} />
+                      <span>{opt.source}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <div className="row" style={{ marginTop: "0.45rem" }}>
+            <button type="button" className="btn btn-secondary" onClick={onMusicbrainzLookup}>
+              muzicbrainz
+            </button>
           </div>
         </div>
 
@@ -220,6 +297,34 @@ export function ReviewDeck({
         )}
 
         <div className="compare-grid">
+          {albumSuggestions.length > 0 && (
+            <div className="guess-chip-row" style={{ marginBottom: "0.35rem" }}>
+              {albumSuggestions.map((album) => (
+                <button
+                  key={`album-${album}`}
+                  type="button"
+                  className="guess-chip"
+                  onClick={() => onProposedChange({ ...proposed, album })}
+                >
+                  Album: {album}
+                </button>
+              ))}
+            </div>
+          )}
+          {yearSuggestions.length > 0 && (
+            <div className="guess-chip-row" style={{ marginBottom: "0.35rem" }}>
+              {yearSuggestions.map((year) => (
+                <button
+                  key={`year-${year}`}
+                  type="button"
+                  className="guess-chip"
+                  onClick={() => onProposedChange({ ...proposed, year })}
+                >
+                  Year: {year}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="compare-head">
             <span>Field</span>
             <span>Current</span>

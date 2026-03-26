@@ -55,6 +55,12 @@ pub struct MatchingOptions {
     /// Query Apple iTunes Search with the filename stem to improve artist/title/cover hints.
     #[serde(default = "default_true")]
     pub use_itunes_filename_hints: bool,
+    #[serde(default = "default_true")]
+    pub use_deezer: bool,
+    #[serde(default)]
+    pub use_spotify: bool,
+    #[serde(default = "default_true")]
+    pub use_amazon: bool,
 }
 
 impl Default for MatchingOptions {
@@ -65,6 +71,9 @@ impl Default for MatchingOptions {
             fallback_recording_only: true,
             fallback_strip_parens: true,
             use_itunes_filename_hints: true,
+            use_deezer: true,
+            use_spotify: false,
+            use_amazon: true,
         }
     }
 }

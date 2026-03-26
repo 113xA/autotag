@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
 use regex::Regex;
+use reqwest::StatusCode;
 use serde_json::Value;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
-use crate::models::LookupCandidate;
+use crate::models::{CoverOption, LookupCandidate};
 use crate::options::MatchingOptions;
 
 const UA: &str = "LibraryAutotag/0.1.0 (https://example.com/autotag)";
@@ -16,6 +17,42 @@ pub struct MbState {
 }
 
 impl MbState {
+    fn is_transient(status: StatusCode) -> bool {
+        matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::GATEWAY_TIMEOUT
+        )
+    }
+
+    async fn get_with_retry(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<Option<reqwest::Response>, String> {
+        let mut backoff_ms = 600_u64;
+        for attempt in 0..3 {
+            let cloned = req
+                .try_clone()
+                .ok_or_else(|| "failed to clone MusicBrainz request".to_string())?;
+            let resp = cloned.send().await.map_err(|e| e.to_string())?;
+            if resp.status().is_success() {
+                return Ok(Some(resp));
+            }
+            if Self::is_transient(resp.status()) {
+                if attempt == 2 {
+                    return Ok(None);
+                }
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(3000);
+                continue;
+            }
+            return Err(format!("MusicBrainz HTTP {}", resp.status()));
+        }
+        Ok(None)
+    }
+
     pub fn new() -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .user_agent(UA)
@@ -114,20 +151,17 @@ impl MbState {
         limit: u64,
     ) -> Result<Option<Vec<Value>>, String> {
         self.throttle().await;
-        let resp = self
+        let req = self
             .client
             .get("https://musicbrainz.org/ws/2/recording")
             .query(&[
                 ("query", query),
                 ("fmt", "json"),
                 ("limit", &limit.to_string()),
-            ])
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("MusicBrainz HTTP {}", resp.status()));
-        }
+            ]);
+        let Some(resp) = self.get_with_retry(req).await? else {
+            return Ok(None);
+        };
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         Ok(v.get("recordings")
             .and_then(|x| x.as_array())
@@ -139,15 +173,9 @@ impl MbState {
         let url = format!(
             "https://musicbrainz.org/ws/2/recording/{recording_id}?inc=releases+artist-credits&fmt=json"
         );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
+        let Some(resp) = self.get_with_retry(self.client.get(&url)).await? else {
             return Ok(None);
-        }
+        };
         let v: Value = resp.json().await.map_err(|e| e.to_string())?;
         let rec = &v;
         let release = rec
@@ -301,7 +329,19 @@ fn candidate_from_recording_and_release(rec: &Value, release: &Value) -> LookupC
         album_artist,
         track_number,
         year,
-        cover_url,
+        cover_url: cover_url.clone(),
+        cover_options: cover_url
+            .as_ref()
+            .map(|url| {
+                vec![CoverOption {
+                    url: url.clone(),
+                    source: "musicbrainz".to_string(),
+                    width: Some(500),
+                    height: Some(500),
+                    score: None,
+                }]
+            })
+            .unwrap_or_default(),
         score: None,
     }
 }

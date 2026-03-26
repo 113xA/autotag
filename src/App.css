@@ -335,6 +335,66 @@ body {
   margin-bottom: 1.15rem;
 }
 
+.quick-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.75rem;
+}
+
+.quick-action-card {
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  border-radius: var(--radius-md);
+  padding: 0.9rem;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease-out), transform 0.12s var(--ease-out);
+}
+
+.quick-action-card:hover:not(:disabled) {
+  border-color: rgba(52, 211, 201, 0.4);
+}
+
+.quick-action-card:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.quick-action-title {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+}
+
+.quick-action-sub {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.tool-header h2 {
+  margin: 0;
+}
+
+.tool-table-wrap {
+  margin-top: 0.8rem;
+}
+
+.tool-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.35rem 0.7rem;
+  margin-top: 0.9rem;
+}
+
 /* —— Toolbar —— */
 .toolbar {
   margin-bottom: 1rem;
@@ -357,6 +417,53 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.lookup-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 220px;
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+}
+
+.lookup-progress-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.lookup-progress-bar {
+  width: 96px;
+  height: 6px;
+  border: none;
+  border-radius: 999px;
+  overflow: hidden;
+  accent-color: var(--accent);
+  background: var(--surface-inset);
+}
+
+.lookup-progress-bar::-webkit-progress-bar {
+  background: var(--surface-inset);
+}
+
+.lookup-progress-bar::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+}
+
+.lookup-progress-bar::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+}
+
+.lookup-progress-text {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  min-width: 3.8rem;
+  text-align: right;
 }
 
 .stat {
@@ -736,6 +843,90 @@ body {
   letter-spacing: 0.08em;
   color: var(--muted);
   margin-bottom: 0.4rem;
+}
+
+.cover-options-block {
+  margin-top: 0.7rem;
+}
+
+.cover-options-title {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.cover-options-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.cover-option-tile {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem;
+  color: var(--text-secondary);
+  font-size: 0.63rem;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.cover-option-tile img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 0.35rem;
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.cover-option-tile.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+.confidence-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  margin-bottom: 0.45rem;
+}
+
+.confidence-pill.high {
+  background: var(--good-dim);
+  color: var(--good);
+}
+
+.confidence-pill.medium {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+}
+
+.confidence-pill.low {
+  background: var(--bad-dim);
+  color: var(--bad);
+}
+
+.guess-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.guess-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text);
+  padding: 0.25rem 0.55rem;
+  font-size: 0.72rem;
+  cursor: pointer;
 }
 
 .file-rename-row {
@@ -1309,6 +1500,12 @@ body {
 
   .toolbar-actions {
     width: 100%;
+  }
+
+  .lookup-progress {
+    margin-left: 0;
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .toolbar-actions .btn {

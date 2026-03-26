@@ -22,6 +22,9 @@ export const defaultMatching = (): AppSettings["matching"] => ({
   fallbackRecordingOnly: true,
   fallbackStripParens: true,
   useItunesFilenameHints: true,
+  useDeezer: true,
+  useSpotify: false,
+  useAmazon: true,
 });
 
 export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({
@@ -50,4 +53,6 @@ export const defaultAppSettings = (): AppSettings => ({
   applyMeta: defaultApplyMeta(),
   autoLookupOnImport: true,
   rename: defaultRename(),
+  spotifyClientId: null,
+  spotifyClientSecret: null,
 });

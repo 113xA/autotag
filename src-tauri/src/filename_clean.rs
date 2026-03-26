@@ -7,13 +7,28 @@ use crate::options::CleaningOptions;
 fn promo_parens_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)\([^)]*(?:SkySound|\.cc|\.net|\.com|\.org)[^)]*\)").unwrap()
+        Regex::new(r"(?i)\([^)]*(?:SkySound|\.cc|\.net|\.com|\.org|\.info)[^)]*\)").unwrap()
     })
 }
 
 fn multispace_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\s+").unwrap())
+}
+
+fn source_tail_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\s*(?:-\s*)?(?:\(?\s*(?:themp3(?:\.info)?|4djsonline|zippy|download)\s*\)?(?:\s*\([^)]*\))?)\s*$",
+        )
+        .unwrap()
+    })
+}
+
+fn leading_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*(?:\d{1,3}\s+){1,4}").unwrap())
 }
 
 fn noise_tail_re(o: &CleaningOptions) -> Option<Regex> {
@@ -93,24 +108,64 @@ fn structural_clean(stem: &str, o: &CleaningOptions) -> String {
     } else {
         s = s.trim().to_string();
     }
+    s = source_tail_re().replace_all(&s, "").to_string();
+    s = multispace_re().replace_all(s.trim(), " ").to_string();
     s
 }
 
-fn split_artist_title<'a>(s: &'a str, rule: &str) -> (Option<&'a str>, &'a str) {
-    let use_last = rule == "lastDash";
-    let split = if use_last {
-        s.rsplit_once(" - ")
-    } else {
-        s.split_once(" - ")
-    };
-    if let Some((a, t)) = split {
-        let a = a.trim();
-        let t = t.trim();
-        if !a.is_empty() && !t.is_empty() {
-            return (Some(a), t);
+fn title_looks_spam(t: &str) -> bool {
+    let tt = t.trim().to_lowercase();
+    tt.contains(".info")
+        || tt.contains(".com")
+        || tt.contains("4djsonline")
+        || tt.contains("themp3")
+        || tt.contains("download")
+}
+
+fn split_artist_title(s: &str, rule: &str) -> (Option<String>, String) {
+    let work = s.trim();
+    let mut cands: Vec<(usize, String, String)> = Vec::new();
+    for sep in [" - ", " — ", " – "] {
+        if let Some((a, t)) = work.split_once(sep) {
+            let a = a.trim();
+            let t = t.trim();
+            if !a.is_empty() && !t.is_empty() {
+                cands.push((sep.len(), a.to_string(), t.to_string()));
+            }
+        }
+        if let Some((a, t)) = work.rsplit_once(sep) {
+            let a = a.trim();
+            let t = t.trim();
+            if !a.is_empty() && !t.is_empty() {
+                cands.push((sep.len() + 10, a.to_string(), t.to_string()));
+            }
         }
     }
-    (None, s)
+    if cands.is_empty() {
+        return (None, work.to_string());
+    }
+    let numeric_prefix = leading_prefix_re();
+    let use_last = rule == "lastDash";
+    cands.sort_by_key(|(k, _, _)| {
+        if use_last {
+            *k + 10
+        } else {
+            *k
+        }
+    });
+    for (_, a, t) in cands {
+        if title_looks_spam(&t) {
+            continue;
+        }
+        let stripped = numeric_prefix.replace(&a, "").to_string();
+        let candidate_artist = if stripped.trim().is_empty() {
+            a
+        } else {
+            stripped.trim().to_string()
+        };
+        return (Some(candidate_artist), t);
+    }
+    (None, work.to_string())
 }
 
 /// Staged cleaning driven by [`CleaningOptions`].
@@ -118,8 +173,8 @@ pub fn clean_filename_stem(stem: &str, o: &CleaningOptions) -> CleanedFilename {
     let base = structural_clean(stem, o);
     let (artist_part, title_part) = split_artist_title(&base, &o.split_rule);
 
-    let mut artist = artist_part.unwrap_or("").to_string();
-    let mut title = title_part.to_string();
+    let mut artist = artist_part.unwrap_or_default();
+    let mut title = title_part;
 
     if o.normalize_feat {
         artist = normalize_featuration(&artist);
@@ -201,5 +256,17 @@ mod tests {
         let c = clean_filename_stem("Act A - Act B - Final Title", &o);
         assert_eq!(c.search_artist, "Act A - Act B");
         assert_eq!(c.search_title, "Final Title");
+    }
+
+    #[test]
+    fn strips_prefix_and_source_suffix() {
+        let c = clean_filename_stem(
+            "19 26 Layla Benitez — All The Time Original Mix - 4DJSONLINE (TheMP3.Info)",
+            &opts_default(),
+        );
+        assert_eq!(c.search_artist, "Layla Benitez");
+        assert_eq!(c.search_title, "All The Time");
+        assert!(!c.search_title.to_lowercase().contains("jsonline"));
+        assert!(!c.search_title.to_lowercase().contains(".info"));
     }
 }

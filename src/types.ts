@@ -44,18 +44,29 @@ export type LookupCandidate = {
   trackNumber: number | null;
   year: number | null;
   coverUrl: string | null;
+  coverOptions: {
+    url: string;
+    source: string;
+    width: number | null;
+    height: number | null;
+    score: number | null;
+  }[];
   score: number | null;
 };
 
 export type LookupResult = {
   path: string;
   candidates: LookupCandidate[];
+  confidence: "high" | "medium" | "low";
+  artistGuesses: string[];
 };
 
 export type ReviewTrack = ScannedTrack & {
   candidates: LookupCandidate[];
   candidateIndex: number;
   reviewStatus: "pending" | "accepted" | "skipped";
+  confidence: "high" | "medium" | "low";
+  artistGuesses: string[];
 };
 
 export type ProposedTags = {
@@ -73,4 +84,84 @@ export type ApplyOutcome = {
   path: string;
   ok: boolean;
   error: string | null;
+};
+
+export type CleanRenameRequestItem = {
+  path: string;
+  cleanedDisplay: string;
+};
+
+export type CleanRenameOutcome = {
+  path: string;
+  nextPath: string | null;
+  ok: boolean;
+  error: string | null;
+};
+
+export type RekordboxTagSnapshot = {
+  path: string;
+  matchKey: string;
+  name: string | null;
+  artist: string | null;
+  album: string | null;
+  grouping: string | null;
+  genre: string | null;
+  averageBpm: number | null;
+  tonality: string | null;
+  rating: number | null;
+  comments: string | null;
+  remixer: string | null;
+  label: string | null;
+  trackNumber: number | null;
+  discNumber: number | null;
+  year: number | null;
+  playCount: number | null;
+};
+
+export type RekordboxPathMatch = {
+  path: string;
+  rekordbox: RekordboxTagSnapshot | null;
+};
+
+export type RekordboxMatchSummary = {
+  rekordboxTracksInXml: number;
+  scannedPaths: number;
+  matchedCount: number;
+  matches: RekordboxPathMatch[];
+};
+
+export type RekordboxApplyPayload = {
+  path: string;
+  name: string | null;
+  artist: string | null;
+  album: string | null;
+  grouping: string | null;
+  genre: string | null;
+  averageBpm: number | null;
+  tonality: string | null;
+  rating: number | null;
+  comments: string | null;
+  remixer: string | null;
+  label: string | null;
+  trackNumber: number | null;
+  discNumber: number | null;
+  year: number | null;
+  playCount: number | null;
+};
+
+export type RekordboxWriteOptions = {
+  writeBpm: boolean;
+  writeKey: boolean;
+  writeRating: boolean;
+  writePlayCounter: boolean;
+  writeComment: boolean;
+  appendPlayCountToComment: boolean;
+  writeRemixer: boolean;
+  writeLabel: boolean;
+  writeGenre: boolean;
+  writeGrouping: boolean;
+  writeTrackNumber: boolean;
+  writeDiscNumber: boolean;
+  writeYear: boolean;
+  writeArtistTitleAlbum: boolean;
 };

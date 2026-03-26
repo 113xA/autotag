@@ -53,6 +53,19 @@ pub struct RekordboxBatchRequest {
     pub options: RekordboxWriteOptions,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanRenameItem {
+    pub path: String,
+    pub cleaned_display: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanRenameBatchRequest {
+    pub items: Vec<CleanRenameItem>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TagSnapshot {
@@ -85,6 +98,16 @@ pub struct ScannedTrack {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CoverOption {
+    pub url: String,
+    pub source: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub score: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LookupCandidate {
     pub recording_mbid: String,
     pub release_mbid: String,
@@ -95,6 +118,8 @@ pub struct LookupCandidate {
     pub track_number: Option<u32>,
     pub year: Option<u32>,
     pub cover_url: Option<String>,
+    #[serde(default)]
+    pub cover_options: Vec<CoverOption>,
     pub score: Option<i32>,
 }
 
@@ -114,6 +139,15 @@ pub struct LookupInput {
 pub struct LookupResult {
     pub path: String,
     pub candidates: Vec<LookupCandidate>,
+    pub confidence: String,
+    pub artist_guesses: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpotifyAuthResult {
+    pub ok: bool,
+    pub expires_in: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +169,15 @@ pub struct ApplyPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyOutcome {
     pub path: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanRenameOutcome {
+    pub path: String,
+    pub next_path: Option<String>,
     pub ok: bool,
     pub error: Option<String>,
 }

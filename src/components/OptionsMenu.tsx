@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { previewRename } from "../api/tauri";
+import { previewRename, spotifyAuth, spotifyAuthBrowser } from "../api/tauri";
 import { EDM_PRESETS, GENRE_SUGGESTIONS, applyPreset } from "../options/presets";
 import type { AppSettings, RenameSeparator, RenameSettings } from "../options/types";
 
 const RENAME_PREVIEW_PATH = "C:\\Music\\example track.mp3";
+const SPOTIFY_REDIRECT_URI = "http://127.0.0.1:43857/callback";
 
 type Props = {
   settings: AppSettings;
@@ -14,6 +15,7 @@ type Props = {
 
 export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
   const [renameExample, setRenameExample] = useState<string | null>(null);
+  const [spotifyStatus, setSpotifyStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -349,6 +351,145 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
               />
               iTunes filename hints (stem sent to Apple search)
             </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.useDeezer}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      useDeezer: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Deezer search hints (free API)
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.useSpotify}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      useSpotify: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Spotify hints (requires login below)
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={s.matching.useAmazon}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    matching: {
+                      ...s.matching,
+                      useAmazon: e.target.checked,
+                    },
+                  })
+                }
+              />
+              Amazon cover hints (public product search)
+            </label>
+            <label className="field block">
+              <span>Spotify client ID (optional)</span>
+              <input
+                value={s.spotifyClientId ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    spotifyClientId: e.target.value.trim() || null,
+                  })
+                }
+                placeholder="Spotify app client ID"
+              />
+            </label>
+            <label className="field block">
+              <span>Spotify client secret (optional)</span>
+              <input
+                value={s.spotifyClientSecret ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...s,
+                    spotifyClientSecret: e.target.value.trim() || null,
+                  })
+                }
+                placeholder="Spotify app client secret"
+              />
+            </label>
+            <div className="opt-hint" style={{ marginBottom: "0.45rem" }}>
+              <strong>Quick setup (recommended)</strong>
+              <br />
+              1) In Spotify Developer Dashboard, open your app and add redirect URI:
+              <br />
+              <code className="mono">{SPOTIFY_REDIRECT_URI}</code>
+              <br />
+              2) Paste your Client ID above
+              <br />
+              3) Click <strong>Connect Spotify (browser)</strong> and approve
+              <br />
+              4) Enable <strong>Spotify hints</strong> to use results in matching
+            </div>
+            <div className="row">
+              <button
+                type="button"
+                className="btn"
+                disabled={!(s.spotifyClientId ?? "").trim()}
+                onClick={async () => {
+                  setSpotifyStatus(null);
+                  try {
+                    const out = await spotifyAuthBrowser(s.spotifyClientId ?? "");
+                    setSpotifyStatus(
+                      out.ok
+                        ? `Spotify connected in browser (${out.expiresIn}s token)`
+                        : "Spotify browser auth failed",
+                    );
+                  } catch (e) {
+                    setSpotifyStatus(`Spotify browser auth failed: ${String(e)}`);
+                  }
+                }}
+              >
+                Connect Spotify (browser)
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={
+                  !(s.spotifyClientId ?? "").trim() ||
+                  !(s.spotifyClientSecret ?? "").trim()
+                }
+                onClick={async () => {
+                  setSpotifyStatus(null);
+                  try {
+                    const out = await spotifyAuth(
+                      s.spotifyClientId ?? "",
+                      s.spotifyClientSecret ?? "",
+                    );
+                    setSpotifyStatus(
+                      out.ok ? `Spotify connected (${out.expiresIn}s token)` : "Spotify auth failed",
+                    );
+                  } catch (e) {
+                    setSpotifyStatus(`Spotify auth failed: ${String(e)}`);
+                  }
+                }}
+              >
+                Connect Spotify (client secret)
+              </button>
+            </div>
+            {!(s.spotifyClientId ?? "").trim() && (
+              <p className="opt-hint">
+                Add your Spotify Client ID first, then use browser connect.
+              </p>
+            )}
+            {spotifyStatus && <p className="opt-hint">{spotifyStatus}</p>}
           </section>
 
           <section className="opt-section">

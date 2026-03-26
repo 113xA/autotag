@@ -1,4 +1,6 @@
+mod amazon;
 mod cover_art;
+mod deezer;
 mod filename_catalog;
 mod filename_clean;
 mod metadata;
@@ -6,27 +8,35 @@ mod models;
 mod musicbrainz;
 mod options;
 mod rekordbox_xml;
+mod smart_lookup;
+mod spotify;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use rusqlite::{params, Connection};
+use serde_json::Value;
 use tauri::Emitter;
+use tauri::Manager;
 use walkdir::WalkDir;
 
 use crate::cover_art::{placeholder_cover_png_bytes, resolve_cover_art, CoverResolveParams};
 use crate::filename_clean::clean_filename_stem;
 use crate::metadata::{
-    build_rename_path, preview_rename_filename, read_tag_snapshot, write_rekordbox_tags,
+    build_rename_path, preview_rename_filename, read_tag_snapshot, sanitize_path_component,
+    write_rekordbox_tags,
     write_tags, WriteTagInput,
 };
 use crate::models::{
-    ApplyBatchRequest, ApplyOutcome, ApplyPayload, LookupInput, LookupResult, RekordboxBatchRequest,
-    RekordboxWriteOptions, ScannedTrack,
+    ApplyBatchRequest, ApplyOutcome, ApplyPayload, CleanRenameBatchRequest, CleanRenameOutcome,
+    LookupInput, LookupResult, RekordboxBatchRequest, RekordboxWriteOptions, ScannedTrack,
+    SpotifyAuthResult,
 };
 use crate::musicbrainz::MbState;
 use crate::options::{
     ApplyMetadataOptions, CleaningOptions, MatchingOptions, ProgressPayload, RenameOptions,
 };
 use crate::rekordbox_xml::{match_rekordbox_xml_to_paths, RekordboxMatchSummary};
+use crate::spotify::SpotifyState;
 
 const AUDIO_EXT: &[&str] = &["mp3", "flac", "m4a", "mp4", "ogg", "opus"];
 
@@ -131,6 +141,9 @@ fn scan_folder_sync(
 async fn batch_lookup(
     app: tauri::AppHandle,
     state: tauri::State<'_, MbState>,
+    deezer: tauri::State<'_, deezer::DeezerState>,
+    spotify: tauri::State<'_, SpotifyState>,
+    amazon: tauri::State<'_, amazon::AmazonState>,
     items: Vec<LookupInput>,
     matching: MatchingOptions,
 ) -> Result<Vec<LookupResult>, String> {
@@ -147,32 +160,17 @@ async fn batch_lookup(
     let client = state.client.clone();
     let mut results = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let hint = if matching.use_itunes_filename_hints && !item.filename_stem.trim().is_empty() {
-            filename_catalog::resolve_from_stem(
-                &client,
-                &item.filename_stem,
-                &item.artist,
-                &item.title,
-            )
-            .await
-        } else {
-            None
-        };
-        let (artist, title) = filename_catalog::merge_for_mb(
-            &item.artist,
-            &item.title,
-            &item.filename_stem,
-            hint.as_ref(),
-        );
-        let mut candidates = state.lookup(&artist, &title, &matching).await?;
-        filename_catalog::backfill_top_cover(
-            &mut candidates,
-            hint.as_ref().and_then(|h| h.artwork_url_hires.as_ref()),
-        );
-        results.push(LookupResult {
-            path: item.path.clone(),
-            candidates,
-        });
+        let one = smart_lookup::smart_lookup_one(
+            &state,
+            &client,
+            &deezer,
+            &spotify,
+            &amazon,
+            item,
+            &matching,
+        )
+        .await?;
+        results.push(one);
         emit_progress(
             &app,
             ProgressPayload {
@@ -184,6 +182,126 @@ async fn batch_lookup(
         );
     }
     Ok(results)
+}
+
+fn session_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("session_state.sqlite3"))
+}
+
+fn ensure_session_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS session_state (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            payload TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_session_snapshot(app: tauri::AppHandle, snapshot: Value) -> Result<(), String> {
+    let db = session_db_path(&app)?;
+    let payload = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let mut conn = Connection::open(db).map_err(|e| e.to_string())?;
+        ensure_session_schema(&conn)?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO session_state(id, payload, updated_at)
+             VALUES(1, ?1, unixepoch())
+             ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+            params![payload],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn load_session_snapshot(app: tauri::AppHandle) -> Result<Option<Value>, String> {
+    let db = session_db_path(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let conn = Connection::open(db).map_err(|e| e.to_string())?;
+        ensure_session_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT payload FROM session_state WHERE id=1")
+            .map_err(|e| e.to_string())?;
+        let row = stmt.query_row([], |r| r.get::<_, String>(0));
+        match row {
+            Ok(payload) => {
+                let parsed = serde_json::from_str::<Value>(&payload).map_err(|e| e.to_string())?;
+                Ok(Some(parsed))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn clear_session_snapshot(app: tauri::AppHandle) -> Result<(), String> {
+    let db = session_db_path(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let conn = Connection::open(db).map_err(|e| e.to_string())?;
+        ensure_session_schema(&conn)?;
+        conn.execute("DELETE FROM session_state WHERE id=1", [])
+            .map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn musicbrainz_lookup_one(
+    state: tauri::State<'_, MbState>,
+    item: LookupInput,
+    matching: MatchingOptions,
+) -> Result<LookupResult, String> {
+    smart_lookup::musicbrainz_only_lookup_one(&state, &item, &matching).await
+}
+
+#[tauri::command]
+async fn spotify_auth(
+    state: tauri::State<'_, MbState>,
+    spotify: tauri::State<'_, SpotifyState>,
+    client_id: String,
+    client_secret: String,
+) -> Result<SpotifyAuthResult, String> {
+    let expires_in = spotify::auth_client_credentials(
+        &spotify,
+        &state.client,
+        &client_id,
+        &client_secret,
+    )
+    .await?;
+    Ok(SpotifyAuthResult {
+        ok: true,
+        expires_in,
+    })
+}
+
+#[tauri::command]
+async fn spotify_auth_browser(
+    state: tauri::State<'_, MbState>,
+    spotify: tauri::State<'_, SpotifyState>,
+    client_id: String,
+) -> Result<SpotifyAuthResult, String> {
+    let expires_in = spotify::auth_browser_pkce(&spotify, &state.client, &client_id).await?;
+    Ok(SpotifyAuthResult {
+        ok: true,
+        expires_in,
+    })
 }
 
 #[tauri::command]
@@ -256,6 +374,87 @@ async fn match_rekordbox_library(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    for i in 2..1000 {
+        let candidate = if ext.is_empty() {
+            parent.join(format!("{stem} ({i})"))
+        } else {
+            parent.join(format!("{stem} ({i}).{ext}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path
+}
+
+#[tauri::command]
+async fn clean_rename_batch(req: CleanRenameBatchRequest) -> Result<Vec<CleanRenameOutcome>, String> {
+    let mut outcomes = Vec::with_capacity(req.items.len());
+    for item in req.items {
+        let p = Path::new(&item.path);
+        let parent = match p.parent() {
+            Some(v) => v,
+            None => {
+                outcomes.push(CleanRenameOutcome {
+                    path: item.path,
+                    next_path: None,
+                    ok: false,
+                    error: Some("no parent directory".into()),
+                });
+                continue;
+            }
+        };
+        let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let stem = sanitize_path_component(&item.cleaned_display);
+        if stem.is_empty() {
+            outcomes.push(CleanRenameOutcome {
+                path: item.path,
+                next_path: None,
+                ok: false,
+                error: Some("cleaned name is empty".into()),
+            });
+            continue;
+        }
+        let candidate = if ext.is_empty() {
+            parent.join(stem)
+        } else {
+            parent.join(format!("{stem}.{ext}"))
+        };
+        let next = unique_path(candidate);
+        if next == p {
+            outcomes.push(CleanRenameOutcome {
+                path: item.path.clone(),
+                next_path: Some(item.path),
+                ok: true,
+                error: None,
+            });
+            continue;
+        }
+        match std::fs::rename(p, &next) {
+            Ok(()) => outcomes.push(CleanRenameOutcome {
+                path: item.path,
+                next_path: Some(next.to_string_lossy().to_string()),
+                ok: true,
+                error: None,
+            }),
+            Err(e) => outcomes.push(CleanRenameOutcome {
+                path: item.path,
+                next_path: None,
+                ok: false,
+                error: Some(e.to_string()),
+            }),
+        }
+    }
+    Ok(outcomes)
 }
 
 fn rekordbox_write_options_active(o: &RekordboxWriteOptions) -> bool {
@@ -419,11 +618,21 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(mb)
+        .manage(deezer::DeezerState::new())
+        .manage(SpotifyState::new())
+        .manage(amazon::AmazonState::new())
         .invoke_handler(tauri::generate_handler![
             scan_folder,
             batch_lookup,
             apply_batch,
             preview_rename,
+            clean_rename_batch,
+            spotify_auth,
+            spotify_auth_browser,
+            save_session_snapshot,
+            load_session_snapshot,
+            clear_session_snapshot,
+            musicbrainz_lookup_one,
             match_rekordbox_library,
             apply_rekordbox_batch
         ])

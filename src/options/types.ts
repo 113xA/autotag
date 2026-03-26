@@ -23,6 +23,9 @@ export type MatchingOptions = {
   fallbackStripParens: boolean;
   /** Send filename stem to Apple iTunes Search for artist/title/cover hints. */
   useItunesFilenameHints: boolean;
+  useDeezer: boolean;
+  useSpotify: boolean;
+  useAmazon: boolean;
 };
 
 export type ApplyMetadataOptions = {
@@ -54,6 +57,8 @@ export type AppSettings = {
   applyMeta: ApplyMetadataOptions;
   autoLookupOnImport: boolean;
   rename: RenameSettings;
+  spotifyClientId: string | null;
+  spotifyClientSecret: string | null;
 };
 
 export type ProgressPayload = {

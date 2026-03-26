@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   applyBatch,
   batchLookup,
+  clearSessionSnapshot,
+  loadSessionSnapshot,
+  musicbrainzLookupOne,
   proposedFromTrack,
+  saveSessionSnapshot,
   scanFolder,
 } from "./api/tauri";
 import { LoadingOverlay } from "./components/LoadingOverlay";
+import { CleanFilenamesPage } from "./components/CleanFilenamesPage";
 import { Logo } from "./components/Logo";
 import { OptionsMenu } from "./components/OptionsMenu";
+import { RekordboxXmlPage } from "./components/RekordboxXmlPage";
 import { ReviewDeck } from "./components/ReviewDeck";
 import { useProgressEvents } from "./hooks/useProgressEvents";
 import { loadSettings, saveSettings } from "./options/storage";
@@ -18,16 +24,43 @@ import { parseU32 } from "./utils/parse";
 import "./App.css";
 
 type Phase = "import" | "review" | "apply_done";
+type PageView = "home" | "autotag" | "clean_names" | "rekordbox_xml";
+type LookupProgressState = {
+  active: boolean;
+  done: number;
+  total: number;
+};
+type SessionSnapshot = {
+  view: PageView;
+  phase: Phase;
+  folder: string | null;
+  settings: AppSettings;
+  tracks: ReviewTrack[];
+  working: ProposedTags | null;
+  error: string | null;
+  applyOutcomes: { path: string; ok: boolean; error: string | null }[] | null;
+  acceptedPayloads: ApplyPayload[];
+  lookupProgress: LookupProgressState;
+};
 
 function toReviewTracks(
   scanned: ScannedTrack[],
-  lookupByPath: Map<string, ReviewTrack["candidates"]>,
+  lookupByPath: Map<
+    string,
+    {
+      candidates: ReviewTrack["candidates"];
+      confidence?: ReviewTrack["confidence"];
+      artistGuesses?: string[];
+    }
+  >,
 ): ReviewTrack[] {
   return scanned.map((t) => ({
     ...t,
-    candidates: lookupByPath.get(t.path) ?? [],
+    candidates: lookupByPath.get(t.path)?.candidates ?? [],
     candidateIndex: 0,
     reviewStatus: "pending" as const,
+    confidence: lookupByPath.get(t.path)?.confidence ?? "low",
+    artistGuesses: lookupByPath.get(t.path)?.artistGuesses ?? [],
   }));
 }
 
@@ -70,6 +103,7 @@ function renameConfirmHint(rename: RenameSettings): string {
 }
 
 export default function App() {
+  const [view, setView] = useState<PageView>("home");
   const [phase, setPhase] = useState<Phase>("import");
   const [folder, setFolder] = useState<string | null>(null);
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
@@ -82,8 +116,72 @@ export default function App() {
     { path: string; ok: boolean; error: string | null }[] | null
   >(null);
   const [acceptedPayloads, setAcceptedPayloads] = useState<ApplyPayload[]>([]);
+  const [lookupProgress, setLookupProgress] = useState<LookupProgressState>({
+    active: false,
+    done: 0,
+    total: 0,
+  });
+  const [savedSession, setSavedSession] = useState<SessionSnapshot | null>(null);
+  const [resumeChecked, setResumeChecked] = useState(false);
+  const lookupRunIdRef = useRef(0);
+  const autosaveTimerRef = useRef<number | null>(null);
 
   const { progress, clearProgress } = useProgressEvents(true);
+
+  const mergeLookupResults = useCallback((results: {
+    path: string;
+    candidates: ReviewTrack["candidates"];
+    confidence?: ReviewTrack["confidence"];
+    artistGuesses?: string[];
+  }[]) => {
+    if (results.length === 0) return;
+    const m = new Map(
+      results.map((r) => [r.path, { candidates: r.candidates, confidence: r.confidence, artistGuesses: r.artistGuesses }] as const),
+    );
+    setTracks((prev) =>
+      prev.map((t) => {
+        const next = m.get(t.path);
+        if (!next) return t;
+        const nextCandidates = next.candidates;
+        const clampedIdx =
+          t.candidateIndex >= nextCandidates.length ? 0 : t.candidateIndex;
+        return {
+          ...t,
+          candidates: nextCandidates,
+          candidateIndex: clampedIdx,
+          confidence: next.confidence ?? t.confidence,
+          artistGuesses: next.artistGuesses ?? t.artistGuesses,
+        };
+      }),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!lookupProgress.active) return;
+    if (!progress || progress.kind !== "lookup") return;
+    setLookupProgress((prev) => {
+      if (!prev.active) return prev;
+      const total = progress.total > 0 ? progress.total : prev.total;
+      const done = Math.min(progress.done, total || progress.done);
+      return { ...prev, done, total };
+    });
+  }, [lookupProgress.active, progress]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSessionSnapshot()
+      .then((raw) => {
+        if (cancelled) return;
+        const snap = raw as SessionSnapshot | null;
+        setSavedSession(snap && snap.tracks ? snap : null);
+      })
+      .finally(() => {
+        if (!cancelled) setResumeChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const updateSettings = useCallback((next: AppSettings) => {
     setSettings(next);
@@ -108,6 +206,37 @@ export default function App() {
     [tracks],
   );
   const allDone = tracks.length > 0 && pendingCount === 0;
+  const hasActiveWork =
+    tracks.length > 0 ||
+    acceptedPayloads.length > 0 ||
+    applyOutcomes !== null ||
+    folder !== null ||
+    phase !== "import";
+
+  const applySnapshot = useCallback((snap: SessionSnapshot) => {
+    setView(snap.view);
+    setPhase(snap.phase);
+    setFolder(snap.folder);
+    setSettings(snap.settings);
+    saveSettings(snap.settings);
+    setTracks(snap.tracks);
+    setWorking(snap.working);
+    setError(snap.error);
+    setApplyOutcomes(snap.applyOutcomes);
+    setAcceptedPayloads(snap.acceptedPayloads);
+    setLookupProgress(snap.lookupProgress);
+  }, []);
+
+  const goHome = useCallback(() => {
+    if (view === "home") return;
+    if (hasActiveWork) {
+      const ok = window.confirm(
+        "Go to Home now? Your progress is autosaved and can be resumed later.",
+      );
+      if (!ok) return;
+    }
+    setView("home");
+  }, [hasActiveWork, view]);
 
   const pickFolder = async () => {
     if (longTask) return;
@@ -123,62 +252,90 @@ export default function App() {
         setError("No supported audio files found (mp3, flac, m4a, ogg, opus).");
         return;
       }
-      let review = toReviewTracks(scanned, new Map());
-      if (settings.autoLookupOnImport) {
-        const items = scanned.map((t) => ({
-          path: t.path,
-          artist: t.cleaned.searchArtist,
-          title: t.cleaned.searchTitle,
-          filenameStem: t.filenameStem,
-        }));
-        const results = await batchLookup(items, settings.matching);
-        const m = new Map(
-          results.map((r) => [r.path, r.candidates] as const),
-        );
-        review = toReviewTracks(scanned, m);
-      }
+      const review = toReviewTracks(scanned, new Map());
+      const items = scanned.map((t) => ({
+        path: t.path,
+        artist: t.cleaned.searchArtist,
+        title: t.cleaned.searchTitle,
+        filenameStem: t.filenameStem,
+      }));
+      const hasLookup = settings.autoLookupOnImport && items.length > 0;
+      const runId = hasLookup ? ++lookupRunIdRef.current : lookupRunIdRef.current;
       setTracks(review);
       setAcceptedPayloads([]);
       setApplyOutcomes(null);
       setPhase("review");
+      setLongTask(false);
+
+      if (!hasLookup) return;
+      setLookupProgress({ active: true, done: 0, total: items.length });
+      void (async () => {
+        try {
+          const all = await batchLookup(items, settings.matching);
+          if (lookupRunIdRef.current !== runId) return;
+          mergeLookupResults(all);
+        } catch (e) {
+          if (lookupRunIdRef.current !== runId) return;
+          setError(String(e));
+        } finally {
+          if (lookupRunIdRef.current !== runId) return;
+          setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+        }
+      })();
     } catch (e) {
       setError(String(e));
-    } finally {
       setLongTask(false);
     }
+  };
+
+  const startAutotagImport = async () => {
+    await clearSessionSnapshot();
+    setSavedSession(null);
+    setView("autotag");
+    setPhase("import");
+    await pickFolder();
   };
 
   const runLookup = async () => {
     if (!folder || tracks.length === 0 || longTask) return;
     setError(null);
     clearProgress();
-    setLongTask(true);
+    const items = tracks.map((t) => ({
+      path: t.path,
+      artist: t.cleaned.searchArtist,
+      title: t.cleaned.searchTitle,
+      filenameStem: t.filenameStem,
+    }));
+    if (items.length === 0) return;
+    const runId = ++lookupRunIdRef.current;
+    setLookupProgress({ active: true, done: 0, total: items.length });
     try {
-      const items = tracks.map((t) => ({
-        path: t.path,
-        artist: t.cleaned.searchArtist,
-        title: t.cleaned.searchTitle,
-        filenameStem: t.filenameStem,
-      }));
-      const results = await batchLookup(items, settings.matching);
-      const m = new Map(results.map((r) => [r.path, r.candidates] as const));
-      setTracks((prev) =>
-        prev.map((t) => {
-          const nextCandidates = m.get(t.path) ?? t.candidates;
-          const clampedIdx =
-            t.candidateIndex >= nextCandidates.length ? 0 : t.candidateIndex;
-          return {
-            ...t,
-            candidates: nextCandidates,
-            candidateIndex: clampedIdx,
-          };
-        }),
-      );
+      const first = await batchLookup([items[0]], settings.matching);
+      if (lookupRunIdRef.current !== runId) return;
+      mergeLookupResults(first);
     } catch (e) {
+      if (lookupRunIdRef.current !== runId) return;
       setError(String(e));
-    } finally {
-      setLongTask(false);
     }
+    if (items.length === 1) {
+      if (lookupRunIdRef.current === runId) {
+        setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total || 1 }));
+      }
+      return;
+    }
+    void (async () => {
+      try {
+        const rest = await batchLookup(items.slice(1), settings.matching);
+        if (lookupRunIdRef.current !== runId) return;
+        mergeLookupResults(rest);
+      } catch (e) {
+        if (lookupRunIdRef.current !== runId) return;
+        setError(String(e));
+      } finally {
+        if (lookupRunIdRef.current !== runId) return;
+        setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
+      }
+    })();
   };
 
   const bumpCandidate = useCallback((delta: number) => {
@@ -194,6 +351,63 @@ export default function App() {
       });
     });
   }, []);
+
+  const rerunSingleLookup = useCallback(
+    async (path: string, artist: string, title: string, filenameStem: string) => {
+      try {
+        const one = await batchLookup(
+          [{ path, artist, title, filenameStem }],
+          settings.matching,
+        );
+        mergeLookupResults(one);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [mergeLookupResults, settings.matching],
+  );
+
+  const rerunSingleMusicbrainz = useCallback(
+    async (path: string, artist: string, title: string, filenameStem: string) => {
+      try {
+        const one = await musicbrainzLookupOne(
+          { path, artist, title, filenameStem },
+          settings.matching,
+        );
+        mergeLookupResults([one]);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [mergeLookupResults, settings.matching],
+  );
+
+  const handleGuessArtist = useCallback(
+    (artistGuess: string) => {
+      if (!current) return;
+      const title = working?.title?.trim() || current.cleaned.searchTitle;
+      void rerunSingleLookup(current.path, artistGuess, title, current.filenameStem);
+    },
+    [current, rerunSingleLookup, working?.title],
+  );
+
+  const handleSwapArtistTitle = useCallback(() => {
+    setWorking((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        artist: prev.title,
+        title: prev.artist,
+      };
+    });
+  }, []);
+
+  const handleMusicbrainzLookup = useCallback(() => {
+    if (!current) return;
+    const artist = working?.artist?.trim() || current.cleaned.searchArtist;
+    const title = working?.title?.trim() || current.cleaned.searchTitle;
+    void rerunSingleMusicbrainz(current.path, artist, title, current.filenameStem);
+  }, [current, rerunSingleMusicbrainz, working?.artist, working?.title]);
 
   const handleAccept = useCallback(() => {
     if (!current || !working) return;
@@ -264,6 +478,8 @@ export default function App() {
       );
       setApplyOutcomes(outcomes);
       setPhase("apply_done");
+      await clearSessionSnapshot();
+      setSavedSession(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -272,6 +488,9 @@ export default function App() {
   };
 
   const resetImport = () => {
+    lookupRunIdRef.current += 1;
+    setLookupProgress({ active: false, done: 0, total: 0 });
+    clearProgress();
     setPhase("import");
     setTracks([]);
     setFolder(null);
@@ -279,7 +498,46 @@ export default function App() {
     setAcceptedPayloads([]);
     setApplyOutcomes(null);
     setError(null);
+    void clearSessionSnapshot();
+    setSavedSession(null);
   };
+
+  useEffect(() => {
+    if (autosaveTimerRef.current !== null) {
+      window.clearTimeout(autosaveTimerRef.current);
+    }
+    autosaveTimerRef.current = window.setTimeout(() => {
+      const snapshot: SessionSnapshot = {
+        view,
+        phase,
+        folder,
+        settings,
+        tracks,
+        working,
+        error,
+        applyOutcomes,
+        acceptedPayloads,
+        lookupProgress,
+      };
+      void saveSessionSnapshot(snapshot).then(() => setSavedSession(snapshot));
+    }, 500);
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current);
+      }
+    };
+  }, [
+    acceptedPayloads,
+    applyOutcomes,
+    error,
+    folder,
+    lookupProgress,
+    phase,
+    settings,
+    tracks,
+    view,
+    working,
+  ]);
 
   return (
     <div className="app-shell">
@@ -302,29 +560,41 @@ export default function App() {
                 </p>
               </div>
             </div>
-                        <button
-              type="button"
-              className="btn btn-ghost settings-btn"
-              aria-label="Open settings"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <svg
-                className="settings-icon"
-                viewBox="0 0 18 24"
-                width={18}
-                height={24}
-                aria-hidden="true"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <g
-                  transform="translate(9 12) scale(0.52) translate(-12 -12)"
-                  fill="currentColor"
+            <div className="row" style={{ gap: "0.5rem" }}>
+              {view !== "home" && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  aria-label="Go home"
+                  onClick={goHome}
                 >
-                  <path d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm7.43-2.53c.04-.32.07-.64.07-.97s-.03-.66-.07-.98l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.37-.31-.59-.22l-2.49 1c-.52-.4-1.06-.73-1.69-.98l-.37-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.47 0-.59.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.63c-.04.32-.07.65-.07.98s.03.65.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.37.3.59.22l2.49-1.01c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.26 1.17-.59 1.69-.98l2.49 1.01c.22.08.47 0 .59-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.63z" />
-                </g>
-              </svg>
-              Settings
-            </button>
+                  Home
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-ghost settings-btn"
+                aria-label="Open settings"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <svg
+                  className="settings-icon"
+                  viewBox="0 0 18 24"
+                  width={18}
+                  height={24}
+                  aria-hidden="true"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <g
+                    transform="translate(9 12) scale(0.52) translate(-12 -12)"
+                    fill="currentColor"
+                  >
+                    <path d="M12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7zm7.43-2.53c.04-.32.07-.64.07-.97s-.03-.66-.07-.98l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.37-.31-.59-.22l-2.49 1c-.52-.4-1.06-.73-1.69-.98l-.37-2.65A.5.5 0 0 0 14 2h-4a.5.5 0 0 0-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.47 0-.59.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.63c-.04.32-.07.65-.07.98s.03.65.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.37.3.59.22l2.49-1.01c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.26 1.17-.59 1.69-.98l2.49 1.01c.22.08.47 0 .59-.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.63z" />
+                  </g>
+                </svg>
+                Settings
+              </button>
+            </div>
           </div>
         </header>
 
@@ -335,12 +605,109 @@ export default function App() {
           onChange={updateSettings}
         />
 
-        {phase === "import" && (
+        {view === "home" && (
+          <section className="panel panel-hero">
+            <p className="muted import-hint">
+              Pick a workflow. You can still tune everything from <strong>Settings</strong>.
+            </p>
+            <div className="quick-actions-grid">
+              {resumeChecked && savedSession && (
+                <button
+                  type="button"
+                  className="quick-action-card"
+                  onClick={() => applySnapshot(savedSession)}
+                  disabled={longTask}
+                >
+                  <span className="quick-action-title">Resume last session</span>
+                  <span className="quick-action-sub">Continue review/apply where you stopped.</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="quick-action-card"
+                onClick={startAutotagImport}
+                disabled={longTask}
+              >
+                <span className="quick-action-title">Choose music folder</span>
+                <span className="quick-action-sub">Run full autotag review + apply flow.</span>
+              </button>
+              <button
+                type="button"
+                className="quick-action-card"
+                onClick={() => setView("clean_names")}
+                disabled={longTask}
+              >
+                <span className="quick-action-title">Clean file names</span>
+                <span className="quick-action-sub">Preview cleaned names and rename selected files.</span>
+              </button>
+              <button
+                type="button"
+                className="quick-action-card"
+                onClick={() => setView("rekordbox_xml")}
+                disabled={longTask}
+              >
+                <span className="quick-action-title">Rekordbox XML import/export</span>
+                <span className="quick-action-sub">Import XML, match tracks, apply Rekordbox fields.</span>
+              </button>
+              {folder && (
+                <button
+                  type="button"
+                  className="quick-action-card"
+                  onClick={async () => {
+                    setView("autotag");
+                    setPhase("import");
+                    await pickFolder();
+                  }}
+                  disabled={longTask}
+                >
+                  <span className="quick-action-title">Choose another music folder</span>
+                  <span className="quick-action-sub">Start a new autotag import session.</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="quick-action-card"
+                onClick={() => setSettingsOpen(true)}
+                disabled={longTask}
+              >
+                <span className="quick-action-title">Open settings</span>
+                <span className="quick-action-sub">Tune cleaning, matching, apply, and rename behavior.</span>
+              </button>
+            </div>
+            {folder && <p className="muted">Last folder: {folder}</p>}
+          </section>
+        )}
+
+        {view === "clean_names" && (
+          <CleanFilenamesPage
+            cleaning={settings.cleaning}
+            onBack={() => setView("home")}
+          />
+        )}
+
+        {view === "rekordbox_xml" && (
+          <RekordboxXmlPage
+            cleaning={settings.cleaning}
+            onBack={() => setView("home")}
+          />
+        )}
+
+        {view === "autotag" && phase === "import" && (
           <section className="panel panel-hero">
             <p className="muted import-hint">
               Configure cleaning, matching, and metadata in{" "}
               <strong>Settings</strong>, then choose a folder.
             </p>
+            <div className="row" style={{ marginBottom: "0.75rem" }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setView("home")}
+                disabled={longTask}
+              >
+                Back to home
+              </button>
+            </div>
             <button
               type="button"
               className="btn primary"
@@ -353,7 +720,7 @@ export default function App() {
           </section>
         )}
 
-        {phase === "review" && (
+        {view === "autotag" && phase === "review" && (
           <>
             <section className="toolbar">
               <div className="toolbar-inner">
@@ -362,6 +729,20 @@ export default function App() {
                   <span className="stat-divider" aria-hidden="true" />
                   <strong>{pendingCount}</strong> left
                 </span>
+                {lookupProgress.active && lookupProgress.total > 0 && (
+                  <div className="lookup-progress" aria-live="polite">
+                    <span className="lookup-progress-label">Lookup progress</span>
+                    <progress
+                      className="lookup-progress-bar"
+                      max={lookupProgress.total}
+                      value={Math.min(lookupProgress.done, lookupProgress.total)}
+                    />
+                    <span className="lookup-progress-text">
+                      {Math.min(lookupProgress.done, lookupProgress.total)} /{" "}
+                      {lookupProgress.total}
+                    </span>
+                  </div>
+                )}
                 <div className="toolbar-actions">
                   <button type="button" className="btn btn-secondary" onClick={runLookup} disabled={longTask}>
                     Re-run lookup
@@ -438,13 +819,16 @@ export default function App() {
                 onNextCandidate={() => bumpCandidate(1)}
                 onAccept={handleAccept}
                 onSkip={handleSkip}
+                onGuessArtist={handleGuessArtist}
+                onSwapArtistTitle={handleSwapArtistTitle}
+                onMusicbrainzLookup={handleMusicbrainzLookup}
                 rename={settings.rename}
               />
             )}
           </>
         )}
 
-        {phase === "apply_done" && applyOutcomes && (
+        {view === "autotag" && phase === "apply_done" && applyOutcomes && (
           <section className="panel panel-done">
             <h2 className="panel-title">Apply finished</h2>
             <ul className="outcomes">
@@ -461,6 +845,14 @@ export default function App() {
             </ul>
             <button type="button" className="btn primary" onClick={resetImport}>
               New session
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => setView("home")}
+              style={{ marginLeft: "0.5rem" }}
+            >
+              Back to home
             </button>
           </section>
         )}
