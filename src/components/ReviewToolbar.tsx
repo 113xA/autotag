@@ -54,6 +54,15 @@ export function ReviewToolbar({
   setSettingsOpen,
   lookupCurrentPath,
 }: Props) {
+  const backgroundActive = backgroundCoverLookup.active && backgroundCoverLookup.total > 0;
+  const backgroundPct = backgroundActive
+    ? Math.round(
+        (Math.min(backgroundCoverLookup.done, backgroundCoverLookup.total) /
+          backgroundCoverLookup.total) *
+          100,
+      )
+    : 0;
+
   return (
     <section className="toolbar">
       <div className="toolbar-inner">
@@ -66,6 +75,15 @@ export function ReviewToolbar({
           )}
           <span className="stat-divider" aria-hidden="true" />
           <strong>{pendingCount}</strong> left
+          {backgroundActive && (
+            <>
+              <span className="stat-divider" aria-hidden="true" />
+              <strong>{backgroundPct}%</strong>
+              <span className="stat-bg-hint" title="Background search completion">
+                background
+              </span>
+            </>
+          )}
         </span>
         {lookupProgress.active && lookupProgress.total > 0 && (
           <div className="lookup-progress" aria-live="polite">
@@ -78,23 +96,6 @@ export function ReviewToolbar({
             <span className="lookup-progress-text">
               {Math.min(lookupProgress.done, lookupProgress.total)} /{" "}
               {lookupProgress.total}
-            </span>
-          </div>
-        )}
-        {backgroundCoverLookup.active && backgroundCoverLookup.total > 0 && (
-          <div className="lookup-progress lookup-progress-bg" aria-live="polite">
-            <span className="lookup-progress-label">Background cover search</span>
-            <progress
-              className="lookup-progress-bar"
-              max={backgroundCoverLookup.total}
-              value={Math.min(
-                backgroundCoverLookup.done,
-                backgroundCoverLookup.total,
-              )}
-            />
-            <span className="lookup-progress-text">
-              {Math.min(backgroundCoverLookup.done, backgroundCoverLookup.total)}{" "}
-              / {backgroundCoverLookup.total}
             </span>
           </div>
         )}

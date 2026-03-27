@@ -3,6 +3,7 @@ import { loadSessionSnapshot, saveSessionSnapshot } from "../api/tauri";
 import { saveSettings } from "../options/storage";
 import type { AppSettings } from "../options/types";
 import type { ApplyOutcome, ApplyPayload, ProposedTags, ReviewTrack } from "../types";
+import { computeConfidenceScore } from "../utils/confidence";
 
 type Phase = "import" | "review" | "apply_done";
 type PageView = "home" | "autotag" | "clean_names" | "rekordbox_xml";
@@ -97,11 +98,11 @@ export function useAutotagSession(args: UseAutotagSessionArgs) {
     setFolder(snap.folder);
     setSettings(snap.settings);
     saveSettings(snap.settings);
-    const migratedTracks = snap.tracks.map((t) =>
-      t.confidenceScore != null
-        ? t
-        : { ...t, confidenceScore: t.confidence === "high" ? 85 : t.confidence === "medium" ? 50 : 10 },
-    );
+    // Recompute confidence using current logic (and filename-based boost).
+    const migratedTracks = snap.tracks.map((t) => ({
+      ...t,
+      confidenceScore: computeConfidenceScore(t.confidence, t.candidates, t.filenameStem),
+    }));
     setTracks(migratedTracks);
     setWorking(snap.working);
     setError(snap.error);

@@ -8,7 +8,13 @@ import {
 import { memo, useEffect, useRef, useState } from "react";
 import { previewRename, readEmbeddedCoverPreview } from "../api/tauri";
 import type { RenameSettings } from "../options/types";
-import type { ProposedTags, ReviewTrack, TagSnapshot } from "../types";
+import type {
+  FilenameModifiers,
+  ParsedFilename,
+  ProposedTags,
+  ReviewTrack,
+  TagSnapshot,
+} from "../types";
 import { parseU32 } from "../utils/parse";
 
 const PLACEHOLDER_COVER = "/placeholder-cover.svg";
@@ -82,6 +88,50 @@ function fmtCurrent(t: TagSnapshot, key: keyof TagSnapshot): string {
   const v = t[key];
   if (v === null || v === undefined) return "";
   return String(v);
+}
+
+function dualStateFromTrack(track: ReviewTrack): ParsedFilename {
+  const p = track.parsed;
+  if (p) return p;
+  return {
+    rawStem: track.filenameStem,
+    rawLower: track.filenameStem.toLowerCase(),
+    cleanArtist: track.cleaned.searchArtist,
+    cleanTitle: track.cleaned.searchTitle,
+    modifiers: {
+      isRemix: false,
+      remixArtist: null,
+      isLive: false,
+      isAcoustic: false,
+      isInstrumental: false,
+      isRemaster: false,
+      isRadioEdit: false,
+      isExtended: false,
+      isVip: false,
+      isBootleg: false,
+      isMashup: false,
+      featArtists: [],
+    },
+  };
+}
+
+function formatModifiersList(m: FilenameModifiers): string {
+  const parts: string[] = [];
+  if (m.remixArtist?.trim()) parts.push(`remix: ${m.remixArtist.trim()}`);
+  else if (m.isRemix) parts.push("remix");
+  if (m.featArtists.length > 0) {
+    parts.push(`feat: ${m.featArtists.join(", ")}`);
+  }
+  if (m.isLive) parts.push("live");
+  if (m.isAcoustic) parts.push("acoustic");
+  if (m.isInstrumental) parts.push("instrumental");
+  if (m.isRemaster) parts.push("remaster");
+  if (m.isRadioEdit) parts.push("radio edit");
+  if (m.isExtended) parts.push("extended");
+  if (m.isVip) parts.push("VIP");
+  if (m.isBootleg) parts.push("bootleg");
+  if (m.isMashup) parts.push("mashup");
+  return parts.length > 0 ? parts.join(" · ") : "";
 }
 
 function ReviewDeckInner({
@@ -184,6 +234,9 @@ function ReviewDeckInner({
   const currentName = track.fileName || basename(track.path);
   const currentCandidate = track.candidates[track.candidateIndex];
   const coverOptions = currentCandidate?.coverOptions ?? [];
+  const dual = dualStateFromTrack(track);
+  const modifiersLine = formatModifiersList(dual.modifiers);
+  const topRanked = track.candidates[0];
 
   useEffect(() => {
     if (!track.current.hasEmbeddedCover || proposed.explicitlyNoCover) {
@@ -313,6 +366,55 @@ function ReviewDeckInner({
         </motion.div>
 
         <div className="file-rename-block">
+          <div className="lookup-search-basis">
+            <div className="lookup-search-basis-title">Filename lookup basis</div>
+            <p className="lookup-search-basis-lead muted">
+              Matches are found with a two-pass flow: tolerant APIs query{" "}
+              <strong>State A</strong> (raw stem); MusicBrainz / strict fallbacks use{" "}
+              <strong>State B</strong> (clean artist + title). Ranking uses State B plus
+              context from State A (not the display-only cleaned label).
+            </p>
+            <dl className="lookup-search-dl">
+              <dt>State A — raw stem</dt>
+              <dd>
+                <code className="mono lookup-search-code">{dual.rawStem || "—"}</code>
+              </dd>
+              <dt>State B — clean query</dt>
+              <dd>
+                <code className="mono lookup-search-code">
+                  {dual.cleanArtist || "—"} — {dual.cleanTitle || "—"}
+                </code>
+              </dd>
+              {modifiersLine ? (
+                <>
+                  <dt>Modifiers (from filename)</dt>
+                  <dd className="lookup-search-modifiers">{modifiersLine}</dd>
+                </>
+              ) : null}
+              {topRanked && n > 0 ? (
+                <>
+                  <dt>Top ranked match</dt>
+                  <dd>
+                    <code className="mono lookup-search-code">
+                      {topRanked.artist} — {topRanked.title}
+                    </code>
+                    {topRanked.score != null ? (
+                      <span className="muted lookup-search-note">
+                        {" "}
+                        · score {Math.round(topRanked.score)}
+                      </span>
+                    ) : null}
+                    {currentCandidate && currentCandidate !== topRanked ? (
+                      <span className="muted lookup-search-note">
+                        {" "}
+                        (viewing match {track.candidateIndex + 1} of {n})
+                      </span>
+                    ) : null}
+                  </dd>
+                </>
+              ) : null}
+            </dl>
+          </div>
           <div className="confidence-row">
             <div className={`confidence-pill ${track.confidence}`}>
               {track.confidence === "high"
@@ -353,7 +455,11 @@ function ReviewDeckInner({
               </button>
             </div>
           )}
-          <div className="file-rename-label">File name</div>
+          <div className="file-rename-label">Rename on disk (from proposed tags)</div>
+          <p className="lookup-search-basis-hint muted">
+            This preview uses the artist/title fields below after you accept — not the
+            short “cleaned display” string from scan.
+          </p>
           <div className="file-rename-row">
             <code className="mono name-old">{currentName}</code>
             <span className="file-rename-arrow">→</span>

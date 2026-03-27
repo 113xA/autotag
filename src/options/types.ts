@@ -26,7 +26,11 @@ export type MatchingOptions = {
   useDeezer: boolean;
   useSpotify: boolean;
   useAmazon: boolean;
+  useDiscogs: boolean;
+  discogsToken: string | null;
   useYoutube: boolean;
+  verifyMusicbrainzAfterFilename: boolean;
+  verifyFingerprintAfterFilename: boolean;
   verboseLogs: boolean;
   concurrency: number;
 };
@@ -54,10 +58,21 @@ export type RenameSettings = {
   partOrder: "artistFirst" | "titleFirst";
 };
 
+export type UiDensity = "comfortable" | "compact";
+
+export type GraphicsOptions = {
+  animationsEnabled: boolean;
+  /** 0-100; used to scale some visual effects (background FX intensity). */
+  animationIntensity: number;
+  backgroundEffects: boolean;
+  uiDensity: UiDensity;
+};
+
 export type AppSettings = {
   cleaning: CleaningOptions;
   matching: MatchingOptions;
   applyMeta: ApplyMetadataOptions;
+  graphics: GraphicsOptions;
   autoLookupOnImport: boolean;
   autoApplyOnComplete: boolean;
   autoAcceptHighConfidence: boolean;

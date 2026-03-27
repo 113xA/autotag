@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::options::{ApplyMetadataOptions, RenameOptions};
+use crate::scoring::ParsedFilename;
 
 pub const AUDIO_EXT: &[&str] = &[
     "mp3", "flac", "m4a", "mp4", "ogg", "opus",
@@ -102,6 +103,8 @@ pub struct ScannedTrack {
     pub filename_stem: String,
     pub cleaned: CleanedFilename,
     pub current: TagSnapshot,
+    /// Dual-state parse with modifier extraction (Phase 1).
+    pub parsed: ParsedFilename,
 }
 
 #[derive(Debug, Clone, Serialize)]

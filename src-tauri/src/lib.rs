@@ -1,6 +1,7 @@
 mod amazon;
 mod cover_art;
 mod deezer;
+mod discogs;
 mod filename_catalog;
 mod filename_clean;
 mod library_db;
@@ -9,6 +10,7 @@ mod models;
 mod musicbrainz;
 mod options;
 mod rekordbox_xml;
+mod scoring;
 mod smart_lookup;
 mod spotify;
 mod youtube;
@@ -25,7 +27,7 @@ use tauri::Manager;
 use walkdir::WalkDir;
 
 use crate::cover_art::{placeholder_cover_png_bytes, resolve_cover_art, CoverResolveParams};
-use crate::filename_clean::clean_filename_stem;
+use crate::filename_clean::{clean_filename_stem, parse_filename};
 use crate::metadata::{
     build_rename_path, embedded_cover_data_url, preview_rename_filename, read_embedded_cover_bytes,
     read_tag_snapshot, sanitize_path_component, unique_available_path, write_rekordbox_tags,
@@ -137,6 +139,7 @@ fn scan_folder_sync(
             .unwrap_or("")
             .to_string();
         let cleaned = clean_filename_stem(&stem, &cleaning);
+        let parsed = parse_filename(&stem, &cleaning);
         let current = read_tag_snapshot(&path_str);
         tracks.push(ScannedTrack {
             path: path_str,
@@ -144,6 +147,7 @@ fn scan_folder_sync(
             filename_stem: stem,
             cleaned,
             current,
+            parsed,
         });
         let done = (i + 1) as u32;
         let emit = done == total || done % 5 == 0 || paths.len() < 20;
@@ -184,7 +188,7 @@ async fn batch_lookup(
     }
 
     let total = items.len() as u32;
-    let concurrency = (matching.concurrency.max(1).min(12)) as usize;
+    let concurrency = (matching.concurrency.max(1).min(16)) as usize;
     emit_progress(
         &app,
         ProgressPayload {
@@ -203,6 +207,8 @@ async fn batch_lookup(
     let client = state.client.clone();
     let done_counter = std::sync::Arc::new(AtomicU32::new(0));
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let discogs_token = matching.discogs_token.clone().unwrap_or_default();
+    let discogs_state = Arc::new(discogs::DiscogsState::new(discogs_token));
 
     let mut handles = Vec::with_capacity(items.len());
     for (i, item) in items.into_iter().enumerate() {
@@ -216,9 +222,22 @@ async fn batch_lookup(
         let sp = Arc::clone(&spotify);
         let am = Arc::clone(&amazon);
         let yt = Arc::clone(&youtube);
+        let dc = Arc::clone(&discogs_state);
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let started = Instant::now();
+            // Emit "currently working on" updates so the UI doesn't look stuck while
+            // long-running lookups are still in progress (before any item completes).
+            let done_now = counter.load(Ordering::Relaxed);
+            emit_progress(
+                &app,
+                ProgressPayload {
+                    kind: "lookup".into(),
+                    done: done_now,
+                    total,
+                    message: Some(item.path.clone()),
+                },
+            );
             if matching.verbose_logs {
                 eprintln!(
                     "[batch_lookup] ({}/{}) start path={}",
@@ -226,7 +245,7 @@ async fn batch_lookup(
                 );
             }
             let one = smart_lookup::smart_lookup_one(
-                &st, &client, &dz, &sp, &am, &yt, &item, &matching,
+                &st, &client, &dz, &sp, &am, &yt, &dc, &item, &matching,
             )
             .await;
             let done = counter.fetch_add(1, Ordering::Relaxed) + 1;

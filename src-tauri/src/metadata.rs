@@ -166,7 +166,9 @@ fn mime_from_hint(hint: Option<&str>, bytes: &[u8]) -> MimeType {
 pub fn sanitize_path_component(s: &str) -> String {
     s.chars()
         .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            // Windows-forbidden chars; use '-' for ':' so names like "19:26" stay readable.
+            '<' | '>' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            ':' => '-',
             c if c.is_control() => '_',
             _ => c,
         })
@@ -216,8 +218,16 @@ fn strip_rename_segment_for_filename(s: &str) -> String {
             break;
         }
     }
+    // Final cleanup: drop stray bracket characters that can remain when earlier
+    // regex stripping removed the *inside* but left an unmatched boundary char.
     t.trim()
-        .trim_matches(|c: char| matches!(c, '-' | '–' | '—' | '_' | '·' | '.'))
+        .trim_matches(|c: char| {
+            matches!(
+                c,
+                '-' | '–' | '—' | '_' | '·' | '.'
+                    | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
         .trim()
         .to_string()
 }
@@ -511,6 +521,18 @@ mod rename_strip_tests {
         assert!(
             !name.to_lowercase().contains("extended"),
             "unexpected extended in {name}"
+        );
+    }
+
+    #[test]
+    fn strips_unmatched_parenthesis_at_edges() {
+        assert_eq!(
+            strip_rename_segment_for_filename("(Major Lazer"),
+            "Major Lazer"
+        );
+        assert_eq!(
+            strip_rename_segment_for_filename("Major Lazer)"),
+            "Major Lazer"
         );
     }
 }

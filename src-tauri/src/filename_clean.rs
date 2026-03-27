@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use crate::models::CleanedFilename;
 use crate::options::CleaningOptions;
+use crate::scoring::{extract_modifiers, ParsedFilename};
 
 fn promo_parens_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -28,7 +29,13 @@ fn source_tail_re() -> &'static Regex {
 
 fn leading_prefix_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^\s*(?:\d{1,3}\s+){1,4}").unwrap())
+    RE.get_or_init(|| {
+        // Promo/tracklist "01 02 Artist" plus clock-style "19_26 " / "19:26 " prefixes (common on DJ rips).
+        Regex::new(
+            r"^\s*(?:(?:\d{1,3}\s+){1,4}|(?:\d{1,2}[_\s:-]+\d{1,2}[_\s]*)+)",
+        )
+        .unwrap()
+    })
 }
 
 fn noise_tail_re(o: &CleaningOptions) -> Option<Regex> {
@@ -62,7 +69,6 @@ fn noise_tail_re(o: &CleaningOptions) -> Option<Regex> {
         parts.push("Instrumental");
         parts.push("Extended Edit");
         parts.push("Original Version");
-        parts.push("Remix");
         parts.push("Edit");
         parts.push("Version");
         parts.push("Mix");
@@ -106,6 +112,11 @@ fn structural_clean(stem: &str, o: &CleaningOptions) -> String {
     if o.strip_promo_parens {
         s = promo_parens_re().replace_all(&s, "").to_string();
     }
+    // Turn `Artist_-_Title` into a splittable dash even when underscores are kept elsewhere.
+    s = s
+        .replace("_-_", " - ")
+        .replace("_–_", " – ")
+        .replace("_—_", " — ");
     if o.underscores_to_spaces {
         s = s.replace('_', " ");
     }
@@ -152,11 +163,13 @@ fn split_artist_title(s: &str, rule: &str) -> (Option<String>, String) {
     }
     let numeric_prefix = leading_prefix_re();
     let use_last = rule == "lastDash";
-    cands.sort_by_key(|(k, _, _)| {
+    // `split_once()` produces a smaller key than `rsplit_once()`.
+    // When `lastDash` is selected we want the larger-key candidate first.
+    cands.sort_by(|(k1, _, _), (k2, _, _)| {
         if use_last {
-            *k + 10
+            k2.cmp(k1)
         } else {
-            *k
+            k1.cmp(k2)
         }
     });
     for (_, a, t) in cands {
@@ -172,6 +185,19 @@ fn split_artist_title(s: &str, rule: &str) -> (Option<String>, String) {
         return (Some(candidate_artist), t);
     }
     (None, work.to_string())
+}
+
+/// Build the dual-state [`ParsedFilename`] from a raw stem and cleaning options.
+pub fn parse_filename(stem: &str, o: &CleaningOptions) -> ParsedFilename {
+    let cleaned = clean_filename_stem(stem, o);
+    let modifiers = extract_modifiers(stem);
+    ParsedFilename {
+        raw_stem: stem.to_string(),
+        raw_lower: stem.to_lowercase(),
+        clean_artist: cleaned.search_artist.clone(),
+        clean_title: cleaned.search_title.clone(),
+        modifiers,
+    }
 }
 
 /// Staged cleaning driven by [`CleaningOptions`].
@@ -190,11 +216,9 @@ pub fn clean_filename_stem(stem: &str, o: &CleaningOptions) -> CleanedFilename {
     let noise_re = noise_tail_re(o);
 
     let display_artist = artist.clone();
-    let display_title = if o.strip_noise_tokens && !o.search_only_extra_strip {
-        strip_noise_end(&title, &noise_re)
-    } else {
-        title.clone()
-    };
+    // IMPORTANT: display is for the user; never strip version/remix/edit info here.
+    // Only `search_*` fields may be stripped to improve match precision.
+    let display_title = title.clone();
 
     let search_artist = if o.strip_noise_tokens && !o.search_only_extra_strip {
         strip_noise_end(&artist, &noise_re)
@@ -274,5 +298,15 @@ mod tests {
         assert_eq!(c.search_title, "All The Time");
         assert!(!c.search_title.to_lowercase().contains("jsonline"));
         assert!(!c.search_title.to_lowercase().contains(".info"));
+    }
+
+    #[test]
+    fn underscore_rip_timecode_prefix() {
+        let c = clean_filename_stem(
+            "19_26_Layla_Benitez_-_All_The_Time_Original_Mix_-_4DJSONLINE_(TheMP3.Info)",
+            &opts_default(),
+        );
+        assert_eq!(c.search_artist, "Layla Benitez");
+        assert_eq!(c.search_title, "All The Time");
     }
 }

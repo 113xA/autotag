@@ -15,6 +15,31 @@ export type CleanedFilename = {
   searchTitle: string;
 };
 
+/** Phase 1: modifiers extracted from raw filename (mirrors Rust `FilenameModifiers`). */
+export type FilenameModifiers = {
+  isRemix: boolean;
+  remixArtist: string | null;
+  isLive: boolean;
+  isAcoustic: boolean;
+  isInstrumental: boolean;
+  isRemaster: boolean;
+  isRadioEdit: boolean;
+  isExtended: boolean;
+  isVip: boolean;
+  isBootleg: boolean;
+  isMashup: boolean;
+  featArtists: string[];
+};
+
+/** Phase 1: dual-state parse (State A raw stem + State B clean entities). */
+export type ParsedFilename = {
+  rawStem: string;
+  rawLower: string;
+  cleanArtist: string;
+  cleanTitle: string;
+  modifiers: FilenameModifiers;
+};
+
 export type ScannedTrack = {
   path: string;
   /** Base name from disk (e.g. `track.mp3`). */
@@ -22,6 +47,8 @@ export type ScannedTrack = {
   filenameStem: string;
   cleaned: CleanedFilename;
   current: TagSnapshot;
+  /** Present when scan came from current backend; used for lookup-basis UI. */
+  parsed?: ParsedFilename;
 };
 
 export type SkippedFile = {

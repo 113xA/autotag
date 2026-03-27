@@ -32,6 +32,7 @@ type PanelId =
   | "apply"
   | "rename"
   | "library"
+  | "graphics"
   | "advanced";
 
 const PANELS: {
@@ -73,6 +74,11 @@ const PANELS: {
     id: "library",
     label: "Music library",
     blurb: "Local catalog of tags and cleaning hints—export/import without filenames if you want.",
+  },
+  {
+    id: "graphics",
+    label: "Graphics",
+    blurb: "Animations, density, and background effects.",
   },
   {
     id: "advanced",
@@ -708,6 +714,22 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                     <label className="check">
                       <input
                         type="checkbox"
+                        checked={s.matching.useDiscogs}
+                        onChange={(e) =>
+                          onChange({
+                            ...s,
+                            matching: {
+                              ...s.matching,
+                              useDiscogs: e.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      Discogs (track + cover verification)
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
                         checked={s.matching.useYoutube}
                         onChange={(e) =>
                           onChange({
@@ -723,16 +745,82 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                     </label>
                   </div>
 
+                  <h4 className="opt-subheading">Post-lookup verification</h4>
+                  <p className="opt-hint">
+                    Run these checks only after filename-based matching has produced candidate
+                    suggestions.
+                  </p>
+                  <div className="opt-check-group">
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={s.matching.verifyMusicbrainzAfterFilename}
+                        onChange={(e) =>
+                          onChange({
+                            ...s,
+                            matching: {
+                              ...s.matching,
+                              verifyMusicbrainzAfterFilename: e.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      Verify top candidate with MusicBrainz after filename lookup
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={s.matching.verifyFingerprintAfterFilename}
+                        onChange={(e) =>
+                          onChange({
+                            ...s,
+                            matching: {
+                              ...s.matching,
+                              verifyFingerprintAfterFilename: e.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      Enable fingerprint-service verification stage (placeholder)
+                    </label>
+                  </div>
+
+                  {s.matching.useDiscogs && (
+                    <div className="opt-card opt-subsection">
+                      <h4 className="opt-subheading">Discogs token</h4>
+                      <p className="opt-hint">
+                        Needed to access Discogs release images and validate track+cover matches.
+                      </p>
+                      <label className="field block">
+                        <span>Discogs user token</span>
+                        <input
+                          type="password"
+                          value={s.matching.discogsToken ?? ""}
+                          onChange={(e) =>
+                            onChange({
+                              ...s,
+                              matching: {
+                                ...s.matching,
+                                discogsToken: e.target.value.trim() || null,
+                              },
+                            })
+                          }
+                          placeholder="Paste Discogs token"
+                        />
+                      </label>
+                    </div>
+                  )}
+
                   <label className="field">
                     <span>Parallel lookups</span>
                     <p className="opt-field-desc">
                       Number of tracks looked up simultaneously. Higher values are faster but use
-                      more network bandwidth. Recommended: 2–6.
+                      more network bandwidth. Recommended: 4-12 for most systems.
                     </p>
                     <input
                       type="range"
                       min={1}
-                      max={8}
+                      max={16}
                       step={1}
                       value={s.matching.concurrency}
                       onChange={(e) =>
@@ -1278,6 +1366,93 @@ export function OptionsMenu({ settings, onChange, open, onClose }: Props) {
                       {libMsg}
                     </p>
                   )}
+                </section>
+              )}
+
+              {panel === "graphics" && (
+                <section className="opt-section opt-card">
+                  <h3 className="opt-heading">Graphics</h3>
+                  <p className="opt-lead">
+                    Control motion effects and UI density. This only affects the look of
+                    the interface (no changes to your music metadata).
+                  </p>
+
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={s.graphics.animationsEnabled}
+                      onChange={(e) =>
+                        onChange({
+                          ...s,
+                          graphics: {
+                            ...s.graphics,
+                            animationsEnabled: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    Enable animations
+                  </label>
+
+                  <label className="field">
+                    <span>Animation intensity</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={s.graphics.animationIntensity}
+                      onChange={(e) =>
+                        onChange({
+                          ...s,
+                          graphics: {
+                            ...s.graphics,
+                            animationIntensity: Number(e.target.value),
+                          },
+                        })
+                      }
+                      disabled={!s.graphics.animationsEnabled}
+                    />
+                    <span className="range-value">
+                      {s.graphics.animationIntensity}%
+                    </span>
+                  </label>
+
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={s.graphics.backgroundEffects}
+                      onChange={(e) =>
+                        onChange({
+                          ...s,
+                          graphics: {
+                            ...s.graphics,
+                            backgroundEffects: e.target.checked,
+                          },
+                        })
+                      }
+                    />
+                    Background effects
+                  </label>
+
+                  <label className="field">
+                    <span>UI density</span>
+                    <select
+                      value={s.graphics.uiDensity}
+                      onChange={(e) =>
+                        onChange({
+                          ...s,
+                          graphics: {
+                            ...s.graphics,
+                            uiDensity: e.target.value as "comfortable" | "compact",
+                          },
+                        })
+                      }
+                    >
+                      <option value="comfortable">Comfortable</option>
+                      <option value="compact">Compact</option>
+                    </select>
+                  </label>
                 </section>
               )}
 

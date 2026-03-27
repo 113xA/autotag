@@ -1,5 +1,11 @@
 import type { AppSettings, RenameSettings } from "./types";
 
+function defaultLookupConcurrency(): number {
+  const hc = Number(globalThis.navigator?.hardwareConcurrency ?? 4);
+  if (!Number.isFinite(hc) || hc <= 0) return 4;
+  return Math.max(2, Math.min(16, Math.round(hc)));
+}
+
 export const defaultCleaning = (): AppSettings["cleaning"] => ({
   stripPromoParens: true,
   underscoresToSpaces: true,
@@ -25,9 +31,13 @@ export const defaultMatching = (): AppSettings["matching"] => ({
   useDeezer: true,
   useSpotify: false,
   useAmazon: true,
+  useDiscogs: false,
+  discogsToken: null,
   useYoutube: false,
+  verifyMusicbrainzAfterFilename: false,
+  verifyFingerprintAfterFilename: false,
   verboseLogs: false,
-  concurrency: 4,
+  concurrency: defaultLookupConcurrency(),
 });
 
 export const defaultApplyMeta = (): AppSettings["applyMeta"] => ({
@@ -50,11 +60,19 @@ export const defaultRename = (): RenameSettings => ({
   partOrder: "artistFirst",
 });
 
+export const defaultGraphics = (): AppSettings["graphics"] => ({
+  animationsEnabled: true,
+  animationIntensity: 70,
+  backgroundEffects: true,
+  uiDensity: "comfortable",
+});
+
 export const defaultAppSettings = (): AppSettings => ({
   cleaning: defaultCleaning(),
   matching: defaultMatching(),
   applyMeta: defaultApplyMeta(),
-  autoLookupOnImport: true,
+  graphics: defaultGraphics(),
+  autoLookupOnImport: false,
   autoApplyOnComplete: false,
   autoAcceptHighConfidence: false,
   autoAcceptConfidenceThreshold: 90,

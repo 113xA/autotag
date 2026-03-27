@@ -62,7 +62,17 @@ pub struct MatchingOptions {
     #[serde(default = "default_true")]
     pub use_amazon: bool,
     #[serde(default)]
+    pub use_discogs: bool,
+    #[serde(default)]
+    pub discogs_token: Option<String>,
+    #[serde(default)]
     pub use_youtube: bool,
+    /// Optional extra verification pass after filename-based candidate ranking.
+    #[serde(default)]
+    pub verify_musicbrainz_after_filename: bool,
+    /// Placeholder toggle for future fingerprint-based post-verification.
+    #[serde(default)]
+    pub verify_fingerprint_after_filename: bool,
     #[serde(default)]
     pub verbose_logs: bool,
     #[serde(default = "default_concurrency")]
@@ -70,7 +80,10 @@ pub struct MatchingOptions {
 }
 
 fn default_concurrency() -> u8 {
-    4
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    cores.clamp(2, 16) as u8
 }
 
 impl Default for MatchingOptions {
@@ -84,7 +97,11 @@ impl Default for MatchingOptions {
             use_deezer: true,
             use_spotify: false,
             use_amazon: true,
+            use_discogs: false,
+            discogs_token: None,
             use_youtube: false,
+            verify_musicbrainz_after_filename: false,
+            verify_fingerprint_after_filename: false,
             verbose_logs: false,
             concurrency: 4,
         }

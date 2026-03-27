@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -37,6 +38,7 @@ import type {
   SkippedFile,
 } from "./types";
 import { parseU32 } from "./utils/parse";
+import { computeConfidenceScore } from "./utils/confidence";
 import {
   bindAppScrollContainer,
   readDocumentScrollY,
@@ -60,26 +62,6 @@ type BackgroundCoverLookupState = {
   /** Lookup in progress for the track currently shown in review (spinner only). */
   workingOnCurrentFile: boolean;
 };
-function computeConfidenceScore(
-  confidence: "high" | "medium" | "low",
-  candidates: ReviewTrack["candidates"],
-): number {
-  if (candidates.length === 0) return 0;
-  const top = candidates[0];
-  const baseFromLevel =
-    confidence === "high" ? 75 : confidence === "medium" ? 40 : 10;
-  const topScore = top.score != null ? Math.min(top.score, 100) : 0;
-  const hasCover = Boolean(
-    top.coverUrl?.trim() || (top.coverOptions?.length ?? 0) > 0,
-  );
-  const coverBonus = hasCover ? 8 : 0;
-  const hasAlbum = Boolean(top.album?.trim());
-  const albumBonus = hasAlbum ? 4 : 0;
-  const hasYear = top.year != null;
-  const yearBonus = hasYear ? 3 : 0;
-  const raw = baseFromLevel + topScore * 0.1 + coverBonus + albumBonus + yearBonus;
-  return Math.min(100, Math.max(0, Math.round(raw)));
-}
 
 function toReviewTracks(
   scanned: ScannedTrack[],
@@ -102,7 +84,11 @@ function toReviewTracks(
       candidateIndex: 0,
       reviewStatus: "pending" as const,
       confidence,
-      confidenceScore: computeConfidenceScore(confidence, candidates),
+      confidenceScore: computeConfidenceScore(
+        confidence,
+        candidates,
+        t.filenameStem,
+      ),
       artistGuesses: lookup?.artistGuesses ?? [],
     };
   });
@@ -220,6 +206,7 @@ export default function App() {
   const reviewDeckAnchorRef = useRef<HTMLDivElement>(null);
   const coverAutoSearchAttemptedRef = useRef<Set<string>>(new Set());
   const coverAutoSearchDeclinedRef = useRef<Set<string>>(new Set());
+  const metadataAutoSearchAttemptedRef = useRef<Set<string>>(new Set());
   const backgroundCoverPassLockRef = useRef(false);
   const tracksRef = useRef(tracks);
   const lookupProgressActiveRef = useRef(lookupProgress.active);
@@ -264,7 +251,11 @@ export default function App() {
           candidates: nextCandidates,
           candidateIndex: clampedIdx,
           confidence: newConfidence,
-          confidenceScore: computeConfidenceScore(newConfidence, nextCandidates),
+          confidenceScore: computeConfidenceScore(
+            newConfidence,
+            nextCandidates,
+            t.filenameStem,
+          ),
           artistGuesses: next.artistGuesses ?? t.artistGuesses,
         };
       }),
@@ -318,7 +309,19 @@ export default function App() {
       setWorking(null);
       return;
     }
-    const key = `${current.path}:${current.candidateIndex}`;
+    const candidate = current.candidates[current.candidateIndex];
+    const candidateSig = candidate
+      ? [
+          candidate.artist ?? "",
+          candidate.title ?? "",
+          candidate.album ?? "",
+          candidate.albumArtist ?? "",
+          candidate.trackNumber != null ? String(candidate.trackNumber) : "",
+          candidate.year != null ? String(candidate.year) : "",
+          current.candidates.length,
+        ].join("|")
+      : `none|${current.candidates.length}`;
+    const key = `${current.path}:${current.candidateIndex}:${candidateSig}`;
     if (workingTrackKeyRef.current === key) {
       return;
     }
@@ -470,12 +473,19 @@ export default function App() {
         filenameStem: t.filenameStem,
       }));
       const runId = items.length > 0 ? ++lookupRunIdRef.current : lookupRunIdRef.current;
+      // Pre-confirmation lookup should stay filename-first and fast:
+      // skip Discogs until review is shown.
+      const preConfirmMatching = {
+        ...settings.matching,
+        useDiscogs: false,
+      };
       backgroundCoverPassLockRef.current = false;
       reviewNavStackRef.current = [];
       setReviewNavRev((v) => v + 1);
       setResumeReviewPath(null);
       coverAutoSearchAttemptedRef.current.clear();
       coverAutoSearchDeclinedRef.current.clear();
+      metadataAutoSearchAttemptedRef.current.clear();
       setBackgroundCoverLookup({
         active: false,
         done: 0,
@@ -486,31 +496,123 @@ export default function App() {
       setAcceptedPayloads([]);
       setAutoAcceptedCount(0);
       setApplyOutcomes(null);
-      setPhase("review");
-      setLongTask(false);
 
-      if (items.length === 0 || !settings.autoLookupOnImport) {
+      if (items.length === 0) {
+        setPhase("review");
+        setLongTask(false);
         setLookupProgress({ active: false, done: 0, total: 0 });
         setLookupCurrentPath(null);
         return;
       }
+
+      // Respect user preference: when auto lookup is disabled, don't run any
+      // lookup before showing the review screen.
+      if (!settings.autoLookupOnImport) {
+        setPhase("review");
+        setLongTask(false);
+        setLookupProgress({ active: false, done: 0, total: 0 });
+        setLookupCurrentPath(null);
+        return;
+      }
+
+      const autoAcceptThreshold = Math.min(
+        100,
+        Math.max(0, settings.autoAcceptConfidenceThreshold),
+      );
+      const hasAutoConfirmable = (
+        results: {
+          path: string;
+          candidates: ReviewTrack["candidates"];
+          confidence?: ReviewTrack["confidence"];
+        }[],
+      ): boolean =>
+        results.some((r) => {
+          if (r.candidates.length === 0) return false;
+          const stem =
+            scanned.find((t) => t.path === r.path)?.filenameStem ?? "";
+          return (
+            computeConfidenceScore(r.confidence ?? "low", r.candidates, stem) >=
+            autoAcceptThreshold
+          );
+        });
+
       setLookupProgress({ active: true, done: 0, total: items.length });
       setLookupCurrentPath(null);
-      void (async () => {
-        try {
-          const all = await batchLookup(items, settings.matching, runId);
+
+      try {
+        // Keep searching before entering confirmation until at least one
+        // auto-confirmable candidate exists (when enabled) or all items are searched.
+        const chunkSize = Math.max(
+          1,
+          Math.min(items.length, settings.matching.concurrency || 4),
+        );
+        let nextIndex = 0;
+        let reviewOpened = false;
+
+        while (nextIndex < items.length) {
+          const chunk = items.slice(nextIndex, nextIndex + chunkSize);
+          const chunkRes = await batchLookup(chunk, preConfirmMatching, runId);
           if (lookupRunIdRef.current !== runId) return;
-          mergeLookupResults(all);
-        } catch (e) {
-          if (lookupRunIdRef.current !== runId) return;
-          setError(String(e));
-        } finally {
-          if (lookupRunIdRef.current === runId) {
-            setLookupProgress((prev) => ({ ...prev, active: false, done: prev.total }));
-            setLookupCurrentPath(null);
+          mergeLookupResults(chunkRes);
+          nextIndex += chunk.length;
+
+          const canAutoConfirmNow =
+            settings.autoAcceptHighConfidence && hasAutoConfirmable(chunkRes);
+          if (canAutoConfirmNow) {
+            setPhase("review");
+            setLongTask(false);
+            reviewOpened = true;
+            break;
           }
         }
-      })();
+
+        if (!reviewOpened) {
+          setPhase("review");
+          setLongTask(false);
+        }
+
+        // If review opened early and auto lookup is enabled, continue remaining lookups
+        // in the background; otherwise stop here.
+        if (nextIndex < items.length && settings.autoLookupOnImport) {
+          const rest = items.slice(nextIndex);
+          void (async () => {
+            try {
+              const restRes = await batchLookup(rest, settings.matching, runId);
+              if (lookupRunIdRef.current !== runId) return;
+              mergeLookupResults(restRes);
+            } catch (e) {
+              if (lookupRunIdRef.current !== runId) return;
+              setError(String(e));
+            } finally {
+              if (lookupRunIdRef.current === runId) {
+                setLookupProgress((prev) => ({
+                  ...prev,
+                  active: false,
+                  done: prev.total,
+                }));
+                setLookupCurrentPath(null);
+              }
+            }
+          })();
+          return;
+        }
+
+        if (lookupRunIdRef.current === runId) {
+          setLookupProgress((prev) => ({
+            ...prev,
+            active: false,
+            done: prev.total || items.length,
+          }));
+          setLookupCurrentPath(null);
+        }
+      } catch (e) {
+        if (lookupRunIdRef.current !== runId) return;
+        setError(String(e));
+        setPhase("review");
+        setLongTask(false);
+        setLookupProgress({ active: false, done: 0, total: 0 });
+        setLookupCurrentPath(null);
+      }
     } catch (e) {
       setError(String(e));
       setLongTask(false);
@@ -530,6 +632,7 @@ export default function App() {
     setError(null);
     clearProgress();
     coverAutoSearchAttemptedRef.current.clear();
+    metadataAutoSearchAttemptedRef.current.clear();
     reviewNavStackRef.current = [];
     setReviewNavRev((v) => v + 1);
     setResumeReviewPath(null);
@@ -793,6 +896,43 @@ export default function App() {
     rerunSingleLookup,
   ]);
 
+  // Fill missing album/year proposals per-track when global auto-lookup is off.
+  useEffect(() => {
+    if (view !== "autotag" || phase !== "review") return;
+    if (!current) return;
+    if (longTask) return;
+    if (lookupProgress.active) return;
+    if (singleLookupPath) return;
+
+    const activeCandidate = current.candidates[current.candidateIndex];
+    const hasAlbumOrYear =
+      current.candidates.length > 0 &&
+      Boolean(
+        activeCandidate &&
+          ((activeCandidate.album?.trim()?.length ?? 0) > 0 ||
+            activeCandidate.year != null),
+      );
+    if (hasAlbumOrYear) return;
+
+    const key = `${current.path}:${current.candidateIndex}`;
+    if (metadataAutoSearchAttemptedRef.current.has(key)) return;
+    metadataAutoSearchAttemptedRef.current.add(key);
+
+    const artist = working?.artist?.trim() || current.cleaned.searchArtist;
+    const title = working?.title?.trim() || current.cleaned.searchTitle;
+    void rerunSingleLookup(current.path, artist, title, current.filenameStem);
+  }, [
+    view,
+    phase,
+    current,
+    longTask,
+    lookupProgress.active,
+    singleLookupPath,
+    working?.artist,
+    working?.title,
+    rerunSingleLookup,
+  ]);
+
   const handleSwapArtistTitle = useCallback(() => {
     setWorking((prev) => {
       if (!prev) return prev;
@@ -977,6 +1117,7 @@ export default function App() {
     setResumeReviewPath(null);
     coverAutoSearchAttemptedRef.current.clear();
     coverAutoSearchDeclinedRef.current.clear();
+    metadataAutoSearchAttemptedRef.current.clear();
     setBackgroundCoverLookup({
       active: false,
       done: 0,
@@ -1083,8 +1224,24 @@ export default function App() {
     anchor.focus({ preventScroll: true });
   }, [current?.path, view, phase, allDone]);
 
+  const graphics = settings.graphics;
+  const intensity = Math.max(0, Math.min(100, graphics.animationIntensity));
+  const bgAfterOpacity = graphics.backgroundEffects
+    ? 0.12 + (intensity / 100) * 0.35
+    : 0;
+  const bgOpacity = graphics.backgroundEffects ? 1 : 0;
+  const appShellStyle = {
+    ["--bgfx-after-opacity" as const]: bgAfterOpacity,
+    ["--bgfx-opacity" as const]: bgOpacity,
+  } as unknown as CSSProperties;
+
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-animations={graphics.animationsEnabled ? "on" : "off"}
+      data-density={graphics.uiDensity}
+      style={appShellStyle}
+    >
       <div className="app-bg" aria-hidden="true" />
       <div className="app">
         <LoadingOverlay open={longTask} progress={progress} />

@@ -141,6 +141,11 @@ export async function musicbrainzLookupOne(
   return invoke<LookupResult>("musicbrainz_lookup_one", { item, matching });
 }
 
+/**
+ * Proposed tags for review / apply / auto-accept.
+ * When a lookup candidate is selected, values come from that candidate (search protocol),
+ * not from filename trimming. With no candidates, fall back to embedded tags then cleaned filename.
+ */
 export function proposedFromTrack(track: ReviewTrack): ProposedTags {
   const currentArtist = track.current.artist?.trim() || "";
   const currentTitle = track.current.title?.trim() || "";
@@ -153,13 +158,12 @@ export function proposedFromTrack(track: ReviewTrack): ProposedTags {
   const c = track.candidates[track.candidateIndex];
   if (c) {
     return {
-      artist: c.artist?.trim() || currentArtist || track.cleaned.searchArtist,
-      title: c.title?.trim() || currentTitle || track.cleaned.searchTitle,
-      album: c.album?.trim() || currentAlbum,
-      albumArtist: c.albumArtist?.trim() || currentAlbumArtist,
-      trackNumber:
-        c.trackNumber != null ? String(c.trackNumber) : currentTrackNumber,
-      year: c.year != null ? String(c.year) : currentYear,
+      artist: c.artist?.trim() || currentArtist || "",
+      title: c.title?.trim() || currentTitle || "",
+      album: c.album?.trim() || "",
+      albumArtist: c.albumArtist?.trim() || "",
+      trackNumber: c.trackNumber != null ? String(c.trackNumber) : "",
+      year: c.year != null ? String(c.year) : "",
       coverUrl: c.coverUrl,
       releaseMbid: c.releaseMbid?.trim() || null,
       explicitlyNoCover: false,

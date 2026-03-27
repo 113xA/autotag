@@ -187,6 +187,61 @@ impl MbState {
         };
         Ok(Some(candidate_from_recording_and_release(rec, rel)))
     }
+
+    /// Look up a recording by ISRC and return the earliest release year and genres.
+    #[allow(dead_code)]
+    pub async fn enrich_by_isrc(&self, isrc: &str) -> Result<Option<IsrcEnrichment>, String> {
+        if isrc.trim().is_empty() {
+            return Ok(None);
+        }
+        self.throttle().await;
+        let url = format!(
+            "https://musicbrainz.org/ws/2/isrc/{isrc}?inc=releases+genres&fmt=json"
+        );
+        let Some(resp) = self.get_with_retry(self.client.get(&url)).await? else {
+            return Ok(None);
+        };
+        let v: Value = resp.json().await.map_err(|e| e.to_string())?;
+        let recordings = v
+            .get("recordings")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if recordings.is_empty() {
+            return Ok(None);
+        }
+        let mut earliest_year: Option<u32> = None;
+        let mut genres: Vec<String> = Vec::new();
+        for rec in &recordings {
+            if let Some(releases) = rec.get("releases").and_then(|x| x.as_array()) {
+                for rel in releases {
+                    if let Some(y) = rel.get("date").and_then(|d| d.as_str()).and_then(|s| s.get(0..4)?.parse::<u32>().ok()) {
+                        earliest_year = Some(earliest_year.map_or(y, |cur: u32| cur.min(y)));
+                    }
+                }
+            }
+            if let Some(genre_arr) = rec.get("genres").and_then(|x| x.as_array()) {
+                for g in genre_arr {
+                    if let Some(name) = g.get("name").and_then(|n| n.as_str()) {
+                        if !genres.contains(&name.to_string()) {
+                            genres.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(IsrcEnrichment {
+            year: earliest_year,
+            genres,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct IsrcEnrichment {
+    pub year: Option<u32>,
+    pub genres: Vec<String>,
 }
 
 fn strip_paren_chunks(s: &str) -> String {
